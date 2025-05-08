@@ -21,11 +21,6 @@ if model_management.sage_attention_enabled():
 else:
     sageattn = torch.nn.functional.scaled_dot_product_attention
 
-if model_management.flash_attention_enabled():
-    from flash_attn import flash_attn_func  # pylint: disable=import-error
-else:
-    flash_attn_func = torch.nn.functional.scaled_dot_product_attention
-
 from ...cli_args import args
 from ... import ops
 
@@ -35,12 +30,11 @@ FORCE_UPCAST_ATTENTION_DTYPE = model_management.force_upcast_attention_dtype()
 logger = logging.getLogger(__name__)
 
 
-def get_attn_precision(attn_precision, current_dtype):
+def get_attn_precision(attn_precision):
     if args.dont_upcast_attention:
         return None
-
-    if FORCE_UPCAST_ATTENTION_DTYPE is not None and current_dtype in FORCE_UPCAST_ATTENTION_DTYPE:
-        return FORCE_UPCAST_ATTENTION_DTYPE[current_dtype]
+    if FORCE_UPCAST_ATTENTION_DTYPE is not None:
+        return FORCE_UPCAST_ATTENTION_DTYPE
     return attn_precision
 
 
@@ -56,6 +50,17 @@ def default(val, d):
     if exists(val):
         return val
     return d
+
+
+def max_neg_value(t):
+    return -torch.finfo(t.dtype).max
+
+
+def init_(tensor):
+    dim = tensor.shape[-1]
+    std = 1 / math.sqrt(dim)
+    tensor.uniform_(-std, std)
+    return tensor
 
 
 # feedforward
@@ -94,7 +99,7 @@ def Normalize(in_channels, dtype=None, device=None):
 
 
 def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
-    attn_precision = get_attn_precision(attn_precision, q.dtype)
+    attn_precision = get_attn_precision(attn_precision)
 
     if skip_reshape:
         b, _, _, dim_head = q.shape
@@ -163,7 +168,7 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
 
 def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
-    attn_precision = get_attn_precision(attn_precision, query.dtype)
+    attn_precision = get_attn_precision(attn_precision)
 
     if skip_reshape:
         b, _, _, dim_head = query.shape
@@ -233,7 +238,7 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
 
 
 def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
-    attn_precision = get_attn_precision(attn_precision, q.dtype)
+    attn_precision = get_attn_precision(attn_precision)
 
     if skip_reshape:
         b, _, _, dim_head = q.shape
@@ -425,7 +430,6 @@ def pytorch_style_decl(func):
     :param func:
     :return:
     """
-
     @wraps(func)
     def wrapper(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False):
         if skip_reshape:
@@ -483,12 +487,12 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
             m = mask
             if mask is not None:
                 if mask.shape[0] > 1:
-                    m = mask[i: i + SDP_BATCH_LIMIT]
+                    m = mask[i : i + SDP_BATCH_LIMIT]
 
-            out[i: i + SDP_BATCH_LIMIT] = torch.nn.functional.scaled_dot_product_attention(
-                q[i: i + SDP_BATCH_LIMIT],
-                k[i: i + SDP_BATCH_LIMIT],
-                v[i: i + SDP_BATCH_LIMIT],
+            out[i : i + SDP_BATCH_LIMIT] = torch.nn.functional.scaled_dot_product_attention(
+                q[i : i + SDP_BATCH_LIMIT],
+                k[i : i + SDP_BATCH_LIMIT],
+                v[i : i + SDP_BATCH_LIMIT],
                 attn_mask=m,
                 dropout_p=0.0, is_causal=False
             ).transpose(1, 2).reshape(-1, q.shape[2], heads * dim_head)
@@ -498,7 +502,7 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
     if skip_reshape:
         b, _, _, dim_head = q.shape
-        tensor_layout = "HND"
+        tensor_layout="HND"
     else:
         b, _, dim_head = q.shape
         dim_head //= heads
@@ -506,7 +510,7 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
             lambda t: t.view(b, -1, heads, dim_head),
             (q, k, v),
         )
-        tensor_layout = "NHD"
+        tensor_layout="NHD"
 
     if mask is not None:
         # add a batch dimension if there isn't already one
@@ -516,17 +520,7 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
 
-    try:
-        out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
-    except Exception as e:
-        logging.error("Error running sage attention: {}, using pytorch attention instead.".format(e))
-        if tensor_layout == "NHD":
-            q, k, v = map(
-                lambda t: t.transpose(1, 2),
-                (q, k, v),
-            )
-        return attention_pytorch(q, k, v, heads, mask=mask, skip_reshape=True, skip_output_reshape=skip_output_reshape)
-
+    out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
     if tensor_layout == "HND":
         if not skip_output_reshape:
             out = (
@@ -540,63 +534,6 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
     return out
 
 
-try:
-    @torch.library.custom_op("flash_attention::flash_attn", mutates_args=())
-    def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
-        return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=causal)  # pylint: disable=possibly-used-before-assignment,used-before-assignment
-
-
-    @flash_attn_wrapper.register_fake
-    def flash_attn_fake(q, k, v, dropout_p=0.0, causal=False):
-        # Output shape is the same as q
-        return q.new_empty(q.shape)
-except AttributeError as error:
-    FLASH_ATTN_ERROR = error
-
-    def flash_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    dropout_p: float = 0.0, causal: bool = False) -> torch.Tensor:
-        assert False, f"Could not define flash_attn_wrapper: {FLASH_ATTN_ERROR}"
-
-
-def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
-    if skip_reshape:
-        b, _, _, dim_head = q.shape
-    else:
-        b, _, dim_head = q.shape
-        dim_head //= heads
-        q, k, v = map(
-            lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
-            (q, k, v),
-        )
-
-    if mask is not None:
-        # add a batch dimension if there isn't already one
-        if mask.ndim == 2:
-            mask = mask.unsqueeze(0)
-        # add a heads dimension if there isn't already one
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(1)
-
-    try:
-        assert mask is None
-        out = flash_attn_wrapper(
-            q.transpose(1, 2),
-            k.transpose(1, 2),
-            v.transpose(1, 2),
-            dropout_p=0.0,
-            causal=False,
-        ).transpose(1, 2)
-    except Exception as e:
-        logging.warning(f"Flash Attention failed, using default SDPA: {e}")
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
-    if not skip_output_reshape:
-        out = (
-            out.transpose(1, 2).reshape(b, -1, heads * dim_head)
-        )
-    return out
-
-
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
@@ -605,9 +542,6 @@ if model_management.sage_attention_enabled():
 elif model_management.xformers_enabled():
     logger.info("Using xformers attention")
     optimized_attention = attention_xformers
-elif model_management.flash_attention_enabled():
-    logging.info("Using Flash Attention")
-    optimized_attention = attention_flash
 elif model_management.pytorch_attention_enabled():
     logger.info("Using pytorch attention")
     optimized_attention = attention_pytorch
@@ -876,7 +810,6 @@ class SpatialTransformer(nn.Module):
         if not isinstance(context, list):
             context = [context] * len(self.transformer_blocks)
         b, c, h, w = x.shape
-        transformer_options["activations_shape"] = list(x.shape)
         x_in = x
         x = self.norm(x)
         if not self.use_linear:
@@ -992,7 +925,6 @@ class SpatialVideoTransformer(SpatialTransformer):
             transformer_options={}
     ) -> torch.Tensor:
         _, _, h, w = x.shape
-        transformer_options["activations_shape"] = list(x.shape)
         x_in = x
         spatial_context = None
         if exists(context):

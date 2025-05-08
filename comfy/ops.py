@@ -15,20 +15,17 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-import logging
 from typing import Optional, Type, Union
 
 import torch
 from torch import Tensor
 
-from . import model_management, rmsnorm
-from .cli_args import args, PerformanceFeature
+from . import model_management
+from .cli_args import args
 from .execution_context import current_execution_context
 from .float import stochastic_rounding
 
 cast_to = model_management.cast_to  # TODO: remove once no more references
-
-logger = logging.getLogger(__name__)
 
 
 def cast_to_input(weight, input, non_blocking=False, copy=True):
@@ -47,17 +44,15 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
     bias = None
     non_blocking = True if torch.jit.is_tracing() or torch.jit.is_scripting() else model_management.device_supports_non_blocking(device)
     if s.bias is not None:
-        has_function = len(s.bias_function) > 0
+        has_function = s.bias_function is not None
         bias = model_management.cast_to(s.bias, bias_dtype, device, non_blocking=non_blocking, copy=has_function)
         if has_function:
-            for f in s.bias_function:
-                bias = f(bias)
+            bias = s.bias_function(bias)
 
-    has_function = len(s.weight_function) > 0
+    has_function = s.weight_function is not None
     weight = model_management.cast_to(s.weight, dtype, device, non_blocking=non_blocking, copy=has_function)
     if has_function:
-        for f in s.weight_function:
-            weight = f(weight)
+        weight = s.weight_function(weight)
     return weight, bias
 
 
@@ -68,8 +63,8 @@ class SkipInit:
 
 class CastWeightBiasOp:
     comfy_cast_weights = False
-    weight_function = []
-    bias_function = []
+    weight_function = None
+    bias_function = None
 
 
 class skip_init:
@@ -123,7 +118,7 @@ class disable_weight_init:
             return torch.nn.functional.linear(input, weight, bias)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -137,7 +132,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -151,7 +146,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -165,7 +160,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -179,7 +174,7 @@ class disable_weight_init:
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -197,26 +192,7 @@ class disable_weight_init:
             return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class RMSNorm(rmsnorm.RMSNorm, CastWeightBiasOp):
-        def reset_parameters(self):
-            self.bias = None
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            if self.weight is not None:
-                weight, bias = cast_bias_weight(self, input)
-            else:
-                weight = None
-            return rmsnorm.rms_norm(input, weight, self.eps)  # TODO: switch to commented out line when old torch is deprecated
-            # return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -237,7 +213,7 @@ class disable_weight_init:
                 output_padding, self.groups, self.dilation)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -258,7 +234,7 @@ class disable_weight_init:
                 output_padding, self.groups, self.dilation)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
@@ -276,7 +252,7 @@ class disable_weight_init:
             return torch.nn.functional.embedding(input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse).to(dtype=output_dtype)
 
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 if "out_dtype" in kwargs:
@@ -316,9 +292,6 @@ class manual_cast(disable_weight_init):
         comfy_cast_weights = True
 
     class ConvTranspose1d(disable_weight_init.ConvTranspose1d):
-        comfy_cast_weights = True
-
-    class RMSNorm(disable_weight_init.RMSNorm):
         comfy_cast_weights = True
 
     class Embedding(disable_weight_init.Embedding):
@@ -393,8 +366,6 @@ class scaled_fp8_op_base(manual_cast):
 
 
 def scaled_fp8_ops(fp8_matrix_mult=False, scale_input=False, override_dtype=None):
-    logger.info("Using scaled fp8: fp8 matrix mult: {}, scale input: {}".format(fp8_matrix_mult, scale_input))
-
     class scaled_fp8_op(scaled_fp8_op_base):
         class Linear(manual_cast.Linear):
             def __init__(self, *args, **kwargs):
@@ -443,29 +414,6 @@ def scaled_fp8_ops(fp8_matrix_mult=False, scale_input=False, override_dtype=None
     return scaled_fp8_op
 
 
-CUBLAS_IS_AVAILABLE = False
-try:
-    from cublas_ops import CublasLinear
-
-    CUBLAS_IS_AVAILABLE = True
-except ImportError:
-    pass
-
-if CUBLAS_IS_AVAILABLE:
-    class cublas_ops(disable_weight_init):
-        class Linear(CublasLinear, disable_weight_init.Linear):
-            def reset_parameters(self):
-                return None
-
-            def forward_comfy_cast_weights(self, input):
-                return super().forward(input)
-
-            def forward(self, *args, **kwargs):
-                return super().forward(*args, **kwargs)
-else:
-    class cublas_ops(disable_weight_init):
-        pass
-
 Operations = Type[Union[manual_cast, fp8_ops, disable_weight_init, skip_init, scaled_fp8_op_base]]
 
 
@@ -475,23 +423,10 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
         inference_mode = current_execution_context().inference_mode
     fp8_compute = model_management.supports_fp8_compute(load_device)
     if scaled_fp8 is not None:
-        return scaled_fp8_ops(fp8_matrix_mult=fp8_compute and fp8_optimizations, scale_input=fp8_optimizations, override_dtype=scaled_fp8)
+        return scaled_fp8_ops(fp8_matrix_mult=fp8_compute, scale_input=True, override_dtype=scaled_fp8)
 
-    if (
-            fp8_compute and
-            (fp8_optimizations or PerformanceFeature.Fp8MatrixMultiplication in args.fast) and
-            not disable_fast_fp8
-    ):
+    if fp8_compute and (fp8_optimizations or args.fast) and not disable_fast_fp8:
         return fp8_ops
-
-    if (
-            PerformanceFeature.CublasOps in args.fast and
-            CUBLAS_IS_AVAILABLE and
-            weight_dtype == torch.float16 and
-            (compute_dtype == torch.float16 or compute_dtype is None)
-    ):
-        logging.info("Using cublas ops")
-        return cublas_ops
 
     if compute_dtype is None or weight_dtype == compute_dtype:
         # disable_weight_init seems to interact poorly with some other optimization code

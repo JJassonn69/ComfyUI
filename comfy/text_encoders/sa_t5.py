@@ -16,8 +16,7 @@ class T5BaseModel(sd1_clip.SDClipModel):
 class T5BaseTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, *args, **kwargs):
         tokenizer_path = files.get_package_as_path("comfy.text_encoders.t5_tokenizer")
-        tokenizer_data = kwargs.pop("tokenizer_data", {})
-        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=768, embedding_key='t5base', tokenizer_class=T5TokenizerFast, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=128, tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=768, embedding_key='t5base', tokenizer_class=T5TokenizerFast, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=128)
 
 
 class SAT5Tokenizer(sd1_clip.SD1Tokenizer):
@@ -28,7 +27,5 @@ class SAT5Tokenizer(sd1_clip.SD1Tokenizer):
 
 
 class SAT5Model(sd1_clip.SD1ClipModel):
-    def __init__(self, device="cpu", dtype=None, model_options=None, **kwargs):
-        if model_options is None:
-            model_options = {}
+    def __init__(self, device="cpu", dtype=None, model_options={}, **kwargs):
         super().__init__(device=device, dtype=dtype, model_options=model_options, name="t5base", clip_model=T5BaseModel, **kwargs)

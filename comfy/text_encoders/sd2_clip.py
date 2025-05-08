@@ -14,10 +14,8 @@ class SD2ClipHModel(sd1_clip.SDClipModel):
 
 
 class SD2ClipHTokenizer(sd1_clip.SDTokenizer):
-    def __init__(self, tokenizer_path=None, embedding_directory=None, tokenizer_data=None, **kwargs):
-        if tokenizer_data is None:
-            tokenizer_data = {}
-        super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=1024, embedding_key='clip_h', tokenizer_data=tokenizer_data)
+    def __init__(self, tokenizer_path=None, embedding_directory=None, **kwargs):
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=1024)
 
 
 class SD2Tokenizer(sd1_clip.SD1Tokenizer):

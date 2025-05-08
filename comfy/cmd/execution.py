@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import heapq
 import inspect
@@ -11,41 +10,36 @@ import time
 import traceback
 import typing
 from contextlib import nullcontext
-from enum import Enum
 from os import PathLike
-from typing import List, Optional, Tuple, Literal
+from typing import List, Optional, Tuple
 
+import lazy_object_proxy
 import torch
 from opentelemetry.trace import get_current_span, StatusCode, Status
 
 from .main_pre import tracer
 from .. import interruption
 from .. import model_management
-from ..caching import HierarchicalCache, LRUCache, CacheKeySetInputSignature, CacheKeySetID, DependencyAwareCache
-from ..cli_args import args
 from ..component_model.abstract_prompt_queue import AbstractPromptQueue
 from ..component_model.executor_types import ExecutorToClientProgress, ValidationTuple, ValidateInputsTuple, \
     ValidationErrorDict, NodeErrorsDictValue, ValidationErrorExtraInfoDict, FormattedValue, RecursiveExecutionTuple, \
     RecursiveExecutionErrorDetails, RecursiveExecutionErrorDetailsInterrupted, ExecutionResult, DuplicateNodeError, \
     HistoryResultDict, ExecutionErrorMessage, ExecutionInterruptedMessage
 from ..component_model.files import canonicalize_path
-from ..component_model.module_property import create_module_properties
 from ..component_model.queue_types import QueueTuple, HistoryEntry, QueueItem, MAXIMUM_HISTORY_SIZE, ExecutionStatus
 from ..execution_context import context_execute_node, context_execute_prompt
-from ..execution_ext import should_panic_on_exception
+from ..nodes.package import import_all_nodes_in_workspace
+from ..nodes.package_typing import ExportedNodes, InputTypeSpec, FloatSpecOptions, IntSpecOptions, CustomNode
+
+# ideally this would be passed in from main, but the way this is authored, we can't easily pass nodes down to the
+# various functions that are declared here. It should have been a context in the first place.
+nodes: ExportedNodes = lazy_object_proxy.Proxy(import_all_nodes_in_workspace)
+
 # order matters
 from ..graph import get_input_info, ExecutionList, DynamicPrompt, ExecutionBlocker
 from ..graph_utils import is_link, GraphBuilder
-from ..nodes.package_typing import InputTypeSpec, FloatSpecOptions, IntSpecOptions, CustomNode
-from ..nodes_context import get_nodes
+from ..caching import HierarchicalCache, LRUCache, CacheKeySetInputSignature, CacheKeySetID
 from ..validation import validate_node_input
-
-_module_properties = create_module_properties()
-
-
-@_module_properties.getter
-def _nodes():
-    return get_nodes()
 
 
 class IsChangedCache:
@@ -60,7 +54,7 @@ class IsChangedCache:
 
         node = self.dynprompt.get_node(node_id)
         class_type = node["class_type"]
-        class_def = get_nodes().NODE_CLASS_MAPPINGS[class_type]
+        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
         if not hasattr(class_def, "IS_CHANGED"):
             self.is_changed[node_id] = False
             return self.is_changed[node_id]
@@ -81,43 +75,21 @@ class IsChangedCache:
         return self.is_changed[node_id]
 
 
-class CacheType(Enum):
-    CLASSIC = 0
-    LRU = 1
-    DEPENDENCY_AWARE = 2
-
-
 class CacheSet:
-    def __init__(self, cache_type=None, cache_size=None):
-        if cache_type == CacheType.DEPENDENCY_AWARE:
-            self.init_dependency_aware_cache()
-            logging.info("Disabling intermediate node cache.")
-        elif cache_type == CacheType.LRU:
-            if cache_size is None:
-                cache_size = 0
-            self.init_lru_cache(cache_size)
-            logging.info("Using LRU cache")
+    def __init__(self, lru_size=None):
+        if lru_size is None or lru_size == 0:
+            # Performs like the old cache -- dump data ASAP
+
+            self.outputs = HierarchicalCache(CacheKeySetInputSignature)
+            self.ui = HierarchicalCache(CacheKeySetInputSignature)
+            self.objects = HierarchicalCache(CacheKeySetID)
         else:
-            self.init_classic_cache()
-
+            # Useful for those with ample RAM/VRAM -- allows experimenting without
+            # blowing away the cache every time
+            self.outputs = LRUCache(CacheKeySetInputSignature, max_size=lru_size)
+            self.ui = LRUCache(CacheKeySetInputSignature, max_size=lru_size)
+            self.objects = HierarchicalCache(CacheKeySetID)
         self.all = [self.outputs, self.ui, self.objects]
-
-    # Performs like the old cache -- dump data ASAP
-    def init_classic_cache(self):
-        self.outputs = HierarchicalCache(CacheKeySetInputSignature)
-        self.ui = HierarchicalCache(CacheKeySetInputSignature)
-        self.objects = HierarchicalCache(CacheKeySetID)
-
-    def init_lru_cache(self, cache_size):
-        self.outputs = LRUCache(CacheKeySetInputSignature, max_size=cache_size)
-        self.ui = LRUCache(CacheKeySetInputSignature, max_size=cache_size)
-        self.objects = HierarchicalCache(CacheKeySetID)
-
-    # only hold cached items while the decendents have not executed
-    def init_dependency_aware_cache(self):
-        self.outputs = DependencyAwareCache(CacheKeySetInputSignature)
-        self.ui = DependencyAwareCache(CacheKeySetInputSignature)
-        self.objects = DependencyAwareCache(CacheKeySetID)
 
     def recursive_debug_dump(self):
         result = {
@@ -137,8 +109,7 @@ def get_input_data(inputs, class_def, unique_id, outputs=None, dynprompt=None, e
     missing_keys = {}
     for x in inputs:
         input_data = inputs[x]
-        _, input_category, input_info = get_input_info(class_def, x, valid_inputs)
-
+        input_type, input_category, input_info = get_input_info(class_def, x, valid_inputs)
         def mark_missing():
             missing_keys[x] = True
             input_data_all[x] = (None,)
@@ -173,8 +144,6 @@ def get_input_data(inputs, class_def, unique_id, outputs=None, dynprompt=None, e
                 input_data_all[x] = [extra_data.get('extra_pnginfo', None)]
             if h[x] == "UNIQUE_ID":
                 input_data_all[x] = [unique_id]
-            if h[x] == "AUTH_TOKEN_COMFY_ORG":
-                input_data_all[x] = [extra_data.get("auth_token_comfy_org", None)]
     return input_data_all, missing_keys
 
 
@@ -321,10 +290,8 @@ def format_value(x) -> FormattedValue:
         return None
     elif isinstance(x, (int, float, bool, str)):
         return x
-    elif isinstance(x, dict) and not any(isinstance(v, torch.Tensor) for v in x.values()):
-        return str(x)
     else:
-        return str(x.__class__)
+        return str(x)
 
 
 def execute(server: ExecutorToClientProgress, dynprompt: DynamicPrompt, caches, _node_id: str, extra_data: dict, executed, prompt_id, execution_list, pending_subgraph_results) -> RecursiveExecutionTuple:
@@ -352,7 +319,7 @@ def _execute(server, dynprompt, caches: CacheSet, current_item: str, extra_data,
     parent_node_id = dynprompt.get_parent_node_id(unique_id)
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
-    class_def = get_nodes().NODE_CLASS_MAPPINGS[class_type]
+    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     if caches.outputs.get(unique_id) is not None:
         if server.client_id is not None:
             cached_output = caches.ui.get(unique_id) or {}
@@ -460,7 +427,7 @@ def _execute(server, dynprompt, caches: CacheSet, current_item: str, extra_data,
                         dynprompt.add_ephemeral_node(node_id, node_info, unique_id, display_id)
                         # Figure out if the newly created node is an output node
                         class_type = node_info["class_type"]
-                        class_def = get_nodes().NODE_CLASS_MAPPINGS[class_type]
+                        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
                         if hasattr(class_def, 'OUTPUT_NODE') and class_def.OUTPUT_NODE == True:
                             new_output_ids.append(node_id)
                     for i in range(len(node_outputs)):
@@ -511,14 +478,6 @@ def _execute(server, dynprompt, caches: CacheSet, current_item: str, extra_data,
             logging.error("Got an OOM, unloading all loaded models.")
             model_management.unload_all_models()
 
-        if should_panic_on_exception(ex, args.panic_when):
-            logging.error(f"The exception {ex} was configured as unrecoverable, scheduling an exit")
-
-            def sys_exit(*args):
-                sys.exit(1)
-
-            asyncio.get_event_loop().call_soon_threadsafe(sys_exit, ())
-
         return RecursiveExecutionTuple(ExecutionResult.FAILURE, error_details, ex)
 
     executed.add(unique_id)
@@ -527,10 +486,9 @@ def _execute(server, dynprompt, caches: CacheSet, current_item: str, extra_data,
 
 
 class PromptExecutor:
-    def __init__(self, server: ExecutorToClientProgress, cache_type: CacheType | Literal[False] = False, cache_size: int | None = None):
+    def __init__(self, server: ExecutorToClientProgress, lru_size=None):
         self.success = None
-        self.cache_size = cache_size
-        self.cache_type = cache_type
+        self.lru_size = lru_size
         self.server = server
         self.raise_exceptions = False
         self.reset()
@@ -538,7 +496,7 @@ class PromptExecutor:
 
     def reset(self):
         self.success = True
-        self.caches = CacheSet(cache_type=self.cache_type, cache_size=self.cache_size)
+        self.caches = CacheSet(self.lru_size)
         self.status_messages = []
 
     def add_message(self, event, data: dict, broadcast: bool):
@@ -674,7 +632,7 @@ class PromptExecutor:
 
 def iterate_obj_classes(prompt: dict[str, typing.Any]) -> typing.Generator[typing.Type[CustomNode], None, None]:
     for _, node in prompt.items():
-        yield get_nodes().NODE_CLASS_MAPPINGS[node['class_type']]
+        yield nodes.NODE_CLASS_MAPPINGS[node['class_type']]
 
 
 def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTuple]) -> ValidateInputsTuple:
@@ -686,7 +644,7 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
 
     inputs = prompt[unique_id]['inputs']
     class_type = prompt[unique_id]['class_type']
-    obj_class = get_nodes().NODE_CLASS_MAPPINGS[class_type]
+    obj_class = nodes.NODE_CLASS_MAPPINGS[class_type]
 
     class_inputs = obj_class.INPUT_TYPES()
     valid_inputs = set(class_inputs.get('required', {})).union(set(class_inputs.get('optional', {})))
@@ -708,7 +666,7 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
     received_types = {}
 
     for x in valid_inputs:
-        input_type, input_category, extra_info = get_input_info(obj_class, x, class_inputs)
+        type_input, input_category, extra_info = get_input_info(obj_class, x, class_inputs)
         assert extra_info is not None
         if x not in inputs:
             if input_category == "required":
@@ -724,7 +682,7 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
             continue
 
         val = inputs[x]
-        info: InputTypeSpec = (input_type, extra_info)
+        info: InputTypeSpec = (type_input, extra_info)
         if isinstance(val, list):
             if len(val) != 2:
                 error = {
@@ -742,13 +700,13 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
 
             o_id = val[0]
             o_class_type = prompt[o_id]['class_type']
-            r = get_nodes().NODE_CLASS_MAPPINGS[o_class_type].RETURN_TYPES
+            r = nodes.NODE_CLASS_MAPPINGS[o_class_type].RETURN_TYPES
             received_type = r[val[1]]
             received_types[x] = received_type
-            any_enum = received_type == [] and (isinstance(input_type, list) or isinstance(input_type, tuple))
+            any_enum = received_type == [] and (isinstance(type_input, list) or isinstance(type_input, tuple))
 
-            if 'input_types' not in validate_function_inputs and not validate_node_input(received_type, input_type) and not any_enum:
-                details = f"{x}, {received_type} != {input_type}"
+            if 'input_types' not in validate_function_inputs and not validate_node_input(received_type, type_input) and not any_enum:
+                details = f"{x}, {received_type} != {type_input}"
                 error = {
                     "type": "return_type_mismatch",
                     "message": "Return type mismatch between linked nodes",
@@ -789,29 +747,22 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
                 continue
         else:
             try:
-                # Unwraps values wrapped in __value__ key. This is used to pass
-                # list widget value to execution, as by default list value is
-                # reserved to represent the connection between nodes.
-                if isinstance(val, dict) and "__value__" in val:
-                    val = val["__value__"]
-                    inputs[x] = val
-
-                if input_type == "INT":
+                if type_input == "INT":
                     val = int(val)
                     inputs[x] = val
-                if input_type == "FLOAT":
+                if type_input == "FLOAT":
                     val = float(val)
                     inputs[x] = val
-                if input_type == "STRING":
+                if type_input == "STRING":
                     val = str(val)
                     inputs[x] = val
-                if input_type == "BOOLEAN":
+                if type_input == "BOOLEAN":
                     val = bool(val)
                     inputs[x] = val
             except Exception as ex:
                 error = {
                     "type": "invalid_input_type",
-                    "message": f"Failed to convert an input value to a {input_type} value",
+                    "message": f"Failed to convert an input value to a {type_input} value",
                     "details": f"{x}, {val}, {ex}",
                     "extra_info": {
                         "input_name": x,
@@ -852,24 +803,23 @@ def validate_inputs(prompt, item, validated: typing.Dict[str, ValidateInputsTupl
                     errors.append(error)
                     continue
 
-                if isinstance(input_type, list):
-                    combo_options = input_type
+                if isinstance(type_input, list):
                     if "\\" in val:
                         # try to normalize paths for comparison purposes
                         val = canonicalize_path(val)
-                    if all(isinstance(item, (str, PathLike)) for item in combo_options):
-                        combo_options = [canonicalize_path(item) for item in combo_options]
-                    if val not in combo_options:
+                    if all(isinstance(item, (str, PathLike)) for item in type_input):
+                        type_input = [canonicalize_path(item) for item in type_input]
+                    if val not in type_input:
                         input_config = info
                         list_info = ""
 
                         # Don't send back gigantic lists like if they're lots of
                         # scanned model filepaths
-                        if len(combo_options) > 20:
-                            list_info = f"(list of length {len(combo_options)})"
+                        if len(type_input) > 20:
+                            list_info = f"(list of length {len(type_input)})"
                             input_config = None
                         else:
-                            list_info = str(combo_options)
+                            list_info = str(type_input)
 
                         error = {
                             "type": "value_not_in_list",
@@ -962,10 +912,10 @@ def _validate_prompt(prompt: typing.Mapping[str, typing.Any]) -> ValidationTuple
                 "details": f"Node ID '#{x}'",
                 "extra_info": {}
             }
-            return ValidationTuple(False, error, [], {})
+            return ValidationTuple(False, error, [], [])
 
         class_type = prompt[x]['class_type']
-        class_ = get_nodes().NODE_CLASS_MAPPINGS.get(class_type, None)
+        class_ = nodes.NODE_CLASS_MAPPINGS.get(class_type, None)
         if class_ is None:
             error = {
                 "type": "invalid_prompt",
@@ -973,7 +923,7 @@ def _validate_prompt(prompt: typing.Mapping[str, typing.Any]) -> ValidationTuple
                 "details": f"Node ID '#{x}'",
                 "extra_info": {}
             }
-            return ValidationTuple(False, error, [], {})
+            return ValidationTuple(False, error, [], [])
 
         if hasattr(class_, 'OUTPUT_NODE') and class_.OUTPUT_NODE is True:
             outputs.add(x)
@@ -985,7 +935,7 @@ def _validate_prompt(prompt: typing.Mapping[str, typing.Any]) -> ValidationTuple
             "details": "",
             "extra_info": {}
         }
-        return ValidationTuple(False, error, [], {})
+        return ValidationTuple(False, error, [], [])
 
     good_outputs = set()
     errors = []

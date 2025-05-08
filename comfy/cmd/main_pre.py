@@ -39,12 +39,17 @@ warnings.filterwarnings("ignore", message="torch.utils._pytree._register_pytree_
 warnings.filterwarnings("ignore", message="Torch was not compiled with flash attention.")
 warnings.filterwarnings("ignore", message=".*Torch was not compiled with flash attention.*")
 warnings.filterwarnings('ignore', category=FutureWarning, message=r'`torch\.cuda\.amp\.custom_fwd.*')
-warnings.filterwarnings("ignore", message="Importing from timm.models.registry is deprecated, please import via timm.models", category=FutureWarning)
-warnings.filterwarnings("ignore", message="Importing from timm.models.layers is deprecated, please import via timm.layers", category=FutureWarning)
-warnings.filterwarnings("ignore", message="Inheritance class _InstrumentedApplication from web.Application is discouraged", category=DeprecationWarning)
-warnings.filterwarnings("ignore", message="Please import `gaussian_filter` from the `scipy.ndimage` namespace; the `scipy.ndimage.filters` namespace is deprecated", category=DeprecationWarning)
 
 from ..cli_args import args
+
+if not hasattr(args, "otel_service_name"):
+    args.otel_service_name = "comfyui"
+if not hasattr(args, "otel_service_version"):
+    args.otel_service_version = "0.0.3"
+if not hasattr(args, "otel_exporter_otlp_endpoint"):
+    args.otel_exporter_otlp_endpoint = None    
+if not hasattr(args, "cwd"):
+    args.cwd = os.getcwd()
 
 if args.cuda_device is not None:
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.cuda_device)
@@ -59,6 +64,7 @@ if args.oneapi_device_selector is not None:
     os.environ['ONEAPI_DEVICE_SELECTOR'] = args.oneapi_device_selector
     this_logger.info("Set oneapi device selector to: {}".format(args.oneapi_device_selector))
 
+
 try:
     from . import cuda_malloc
 except Exception:
@@ -66,8 +72,6 @@ except Exception:
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
-os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
 
 
 def _fix_pytorch_240():
@@ -131,15 +135,6 @@ def _create_tracer():
     return trace.get_tracer(args.otel_service_name)
 
 
-def _configure_logging():
-    logging_level = args.logging_level
-    if args.distributed_queue_worker or args.distributed_queue_frontend or args.distributed_queue_connection_uri is not None:
-        logging.basicConfig(level=logging_level)
-    else:
-        logger.setup_logger(logging_level)
-
-
-_configure_logging()
 _fix_pytorch_240()
 tracer = _create_tracer()
 __all__ = ["args", "tracer"]

@@ -1,9 +1,6 @@
 from functools import reduce
 from operator import add, mul, pow
-from typing import Any
 
-from comfy.comfy_types import IO
-from comfy.node_helpers import export_custom_nodes
 from comfy.nodes.package_typing import CustomNode, InputTypes
 
 
@@ -513,40 +510,6 @@ class IntToFloat(CustomNode):
         return float(value),
 
 
-class IntToString(CustomNode):
-    @classmethod
-    def INPUT_TYPES(cls) -> InputTypes:
-        return {
-            "required": {
-                "value": ("INT", {}),
-            }
-        }
-
-    CATEGORY = "arithmetic"
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "execute"
-
-    def execute(self, value: int = 0):
-        return str(value),
-
-
-class FloatToString(CustomNode):
-    @classmethod
-    def INPUT_TYPES(cls) -> InputTypes:
-        return {
-            "required": {
-                "value": ("FLOAT", {}),
-            }
-        }
-
-    CATEGORY = "arithmetic"
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "execute"
-
-    def execute(self, value: float = 0):
-        return str(value),
-
-
 class FloatToInt(CustomNode):
     @classmethod
     def INPUT_TYPES(cls) -> InputTypes:
@@ -564,38 +527,32 @@ class FloatToInt(CustomNode):
         return int(value),
 
 
-class StringToInt(CustomNode):
-    @classmethod
-    def INPUT_TYPES(cls) -> InputTypes:
-        return {
-            "required": {
-                "value": ("STRING", {}),
-            }
-        }
-
-    CATEGORY = "arithmetic"
-    RETURN_TYPES = ("INT",)
-    FUNCTION = "execute"
-
-    def execute(self, value: str = "0"):
-        return int(value),
-
-
-class StringToFloat(CustomNode):
-    @classmethod
-    def INPUT_TYPES(cls) -> InputTypes:
-        return {
-            "required": {
-                "value": ("STRING", {}),
-            }
-        }
-
-    CATEGORY = "arithmetic"
-    RETURN_TYPES = ("FLOAT",)
-    FUNCTION = "execute"
-
-    def execute(self, value: str = "0"):
-        return float(value),
-
-
-export_custom_nodes()
+NODE_CLASS_MAPPINGS = {}
+for cls in (
+        FloatAdd,
+        FloatSubtract,
+        FloatMultiply,
+        FloatDivide,
+        FloatPower,
+        FloatMin,
+        FloatMax,
+        FloatAbs,
+        FloatAverage,
+        FloatLerp,
+        FloatInverseLerp,
+        FloatClamp,
+        IntAdd,
+        IntSubtract,
+        IntMultiply,
+        IntDivide,
+        IntMod,
+        IntPower,
+        IntMin,
+        IntMax,
+        IntAbs,
+        IntAverage,
+        IntLerp,
+        IntInverseLerp,
+        IntClamp,
+):
+    NODE_CLASS_MAPPINGS[cls.__name__] = cls

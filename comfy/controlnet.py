@@ -425,7 +425,10 @@ def controlnet_config(sd, model_options=None):
         weight_dtype = utils.weight_dtype(sd)
 
         supported_inference_dtypes = list(model_config.supported_inference_dtypes)
-        unet_dtype = model_management.unet_dtype(model_params=-1, supported_dtypes=supported_inference_dtypes, weight_dtype=weight_dtype)
+        if weight_dtype is not None:
+            supported_inference_dtypes.append(weight_dtype)
+
+        unet_dtype = model_management.unet_dtype(model_params=-1, supported_dtypes=supported_inference_dtypes)
 
     load_device = model_management.get_torch_device()
     manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device)
@@ -762,7 +765,10 @@ def load_controlnet_state_dict(state_dict, model=None, model_options=None, ckpt_
         if supported_inference_dtypes is None:
             supported_inference_dtypes = [model_management.unet_dtype()]
 
-        unet_dtype = model_management.unet_dtype(model_params=-1, supported_dtypes=supported_inference_dtypes, weight_dtype=weight_dtype)
+        if weight_dtype is not None:
+            supported_inference_dtypes.append(weight_dtype)
+
+        unet_dtype = model_management.unet_dtype(model_params=-1, supported_dtypes=supported_inference_dtypes)
 
     load_device = model_management.get_torch_device()
 
@@ -817,8 +823,6 @@ def load_controlnet_state_dict(state_dict, model=None, model_options=None, ckpt_
 def load_controlnet(ckpt_path, model=None, model_options=None):
     if model_options is None:
         model_options = {}
-    model_options = model_options.copy()
-
     if "global_average_pooling" not in model_options:
         filename = os.path.splitext(ckpt_path)[0]
         if filename.endswith("_shuffle") or filename.endswith("_shuffle_fp16"):  # TODO: smarter way of enabling global_average_pooling

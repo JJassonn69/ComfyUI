@@ -13,7 +13,6 @@ class SDXLClipG(sd1_clip.SDClipModel):
             layer_idx = -2
 
         textmodel_json_config = get_path_as_dict(textmodel_json_config, "clip_config_bigg.json")
-        model_options = {**model_options, "model_name": "clip_g"}
         super().__init__(device=device, freeze=freeze, layer=layer, layer_idx=layer_idx, textmodel_json_config=textmodel_json_config, dtype=dtype,
                          special_tokens={"start": 49406, "end": 49407, "pad": 0}, layer_norm_hidden_state=False, return_projected_pooled=True, model_options=model_options)
 
@@ -23,18 +22,18 @@ class SDXLClipG(sd1_clip.SDClipModel):
 
 class SDXLClipGTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, tokenizer_path=None, embedding_directory=None, **kwargs):
-        tokenizer_data = kwargs.pop("tokenizer_data", {})
-        super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=1280, embedding_key='clip_g', tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=1280, embedding_key='clip_g')
 
 
 class SDXLTokenizer:
     def __init__(self, embedding_directory=None, tokenizer_data=None, **kwargs):
         if tokenizer_data is None:
             tokenizer_data = {}
-        self.clip_l = sd1_clip.SDTokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
-        self.clip_g = SDXLClipGTokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
+        clip_l_tokenizer_class = tokenizer_data.get("clip_l_tokenizer_class", sd1_clip.SDTokenizer)
+        self.clip_l = clip_l_tokenizer_class(embedding_directory=embedding_directory)
+        self.clip_g = SDXLClipGTokenizer(embedding_directory=embedding_directory)
 
-    def tokenize_with_weights(self, text: str, return_word_ids=False, **kwargs):
+    def tokenize_with_weights(self, text: str, return_word_ids=False):
         out = {}
         out["g"] = self.clip_g.tokenize_with_weights(text, return_word_ids)
         out["l"] = self.clip_l.tokenize_with_weights(text, return_word_ids)
@@ -56,8 +55,11 @@ class SDXLTokenizer:
 class SDXLClipModel(torch.nn.Module):
     def __init__(self, device="cpu", dtype=None, model_options=None, textmodel_json_config=None):
         super().__init__()
-        self.clip_l = sd1_clip.SDClipModel(layer="hidden", layer_idx=-2, device=device, dtype=dtype, layer_norm_hidden_state=False, model_options=model_options)
-        self.clip_g = SDXLClipG(device=device, dtype=dtype, model_options=model_options)
+        if model_options is None:
+            model_options = {}
+        clip_l_class = model_options.get("clip_l_class", sd1_clip.SDClipModel)
+        self.clip_l = clip_l_class(layer="hidden", layer_idx=-2, device=device, dtype=dtype, layer_norm_hidden_state=False, model_options=model_options, textmodel_json_config=textmodel_json_config)
+        self.clip_g = SDXLClipG(device=device, dtype=dtype, model_options=model_options, textmodel_json_config=textmodel_json_config)
         self.dtypes = {dtype}
 
     def set_clip_options(self, options):
@@ -95,7 +97,7 @@ class StableCascadeClipGTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, tokenizer_path=None, embedding_directory=None, tokenizer_data=None):
         if tokenizer_data is None:
             tokenizer_data = {}
-        super().__init__(tokenizer_path, pad_with_end=True, embedding_directory=embedding_directory, embedding_size=1280, embedding_key='clip_g', tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer_path, pad_with_end=True, embedding_directory=embedding_directory, embedding_size=1280, embedding_key='clip_g')
 
 
 class StableCascadeTokenizer(sd1_clip.SD1Tokenizer):
@@ -108,7 +110,6 @@ class StableCascadeTokenizer(sd1_clip.SD1Tokenizer):
 class StableCascadeClipG(sd1_clip.SDClipModel):
     def __init__(self, device="cpu", max_length=77, freeze=True, layer="hidden", layer_idx=-1, dtype=None, textmodel_json_config=None, model_options={}):
         textmodel_json_config = get_path_as_dict(textmodel_json_config, "clip_config_bigg.json")
-        model_options = {**model_options, "model_name": "clip_g"}
         super().__init__(device=device, freeze=freeze, layer=layer, layer_idx=layer_idx, textmodel_json_config=textmodel_json_config, dtype=dtype,
                          special_tokens={"start": 49406, "end": 49407, "pad": 49407}, layer_norm_hidden_state=False, enable_attention_masks=True, return_projected_pooled=True, model_options=model_options)
 

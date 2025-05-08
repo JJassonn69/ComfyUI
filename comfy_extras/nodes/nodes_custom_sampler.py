@@ -8,7 +8,6 @@ from comfy.cmd import latent_preview
 import torch
 from comfy import utils
 from comfy import node_helpers
-from comfy.nodes.package_typing import Seed, Seed64
 from comfy.samplers import KSAMPLER
 
 
@@ -459,7 +458,7 @@ class SamplerCustom:
         return {"required":
                     {"model": ("MODEL",),
                     "add_noise": ("BOOLEAN", {"default": True}),
-                    "noise_seed": Seed64,
+                    "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step":0.1, "round": 0.01}),
                     "positive": ("CONDITIONING", ),
                     "negative": ("CONDITIONING", ),
@@ -611,7 +610,7 @@ class RandomNoise(DisableNoise):
     @classmethod
     def INPUT_TYPES(s):
         return {"required":{
-                    "noise_seed": Seed64,
+                    "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      }
                 }
 

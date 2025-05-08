@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import collections
 import enum
-import os
+from pathlib import Path
 from typing import Optional, List, Callable, Any, Union, Mapping, NamedTuple
 
 import configargparse
@@ -31,23 +32,6 @@ class ConfigChangeHandler(FileSystemEventHandler):
 ConfigObserver = Callable[[str, Any], None]
 
 
-def is_valid_directory(path: str) -> str:
-    """Validate if the given path is a directory, and check permissions."""
-    if not os.path.exists(path):
-        raise argparse.ArgumentTypeError(f"The path '{path}' does not exist.")
-    if not os.path.isdir(path):
-        raise argparse.ArgumentTypeError(f"'{path}' is not a directory.")
-    if not os.access(path, os.R_OK):
-        raise argparse.ArgumentTypeError(f"You do not have read permissions for '{path}'.")
-    return path
-
-
-class PerformanceFeature(enum.Enum):
-    Fp16Accumulation = "fp16_accumulation"
-    Fp8MatrixMultiplication = "fp8_matrix_mult"
-    CublasOps = "cublas_ops"
-
-
 class Configuration(dict):
     """
     Configuration options parsed from command-line arguments or config files.
@@ -56,7 +40,6 @@ class Configuration(dict):
         config_files (Optional[List[str]]): Path to the configuration file(s) that were set in the arguments.
         cwd (Optional[str]): Working directory. Defaults to the current directory. This is always treated as a base path for model files, and it will be the place where model files are downloaded.
         base_paths (Optional[list[str]]): Additional base paths for custom nodes, models and inputs.
-        base_directory (Optional[str]): Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.
         listen (str): IP address to listen on. Defaults to "127.0.0.1".
         port (int): Port number for the server to listen on. Defaults to 8188.
         enable_cors_header (Optional[str]): Enables CORS with the specified origin.
@@ -98,7 +81,6 @@ class Configuration(dict):
         use_quad_cross_attention (bool): Use sub-quadratic cross-attention optimization.
         use_pytorch_cross_attention (bool): Use PyTorch's cross-attention function.
         use_sage_attention (bool): Use Sage Attention
-        use_flas_attention (bool): Use FlashAttention
         disable_xformers (bool): Disable xformers.
         gpu_only (bool): Run everything on the GPU.
         highvram (bool): Keep models in GPU memory.
@@ -106,7 +88,7 @@ class Configuration(dict):
         lowvram (bool): Reduce UNet's VRAM usage.
         novram (bool): Minimize VRAM usage.
         cpu (bool): Use CPU for processing.
-        fast (set[PerformanceFeature]): Enable some untested and potentially quality deteriorating optimizations. Pass a list specific optimizations if you only want to enable specific ones. Current valid optimizations: fp16_accumulation fp8_matrix_mult cublas_ops
+        fast (bool): Enable some untested and potentially quality deteriorating optimizations
         reserve_vram (Optional[float]): Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reserved depending on your OS
         disable_smart_memory (bool): Disable smart memory management.
         deterministic (bool): Use deterministic algorithms where possible.
@@ -140,8 +122,6 @@ class Configuration(dict):
         anthropic_api_key (str): Configures the Anthropic API key for its nodes related to Claude functionality. Visit https://console.anthropic.com/settings/keys to create this key.
         user_directory (Optional[str]): Set the ComfyUI user directory with an absolute path.
         log_stdout (bool): Send normal process output to stdout instead of stderr (default)
-        panic_when (list[str]): List of fully qualified exception class names to panic (sys.exit(1)) when a workflow raises it.
-        enable_compress_response_body (bool): Enable compressing response body.
     """
 
     def __init__(self, **kwargs):
@@ -150,11 +130,9 @@ class Configuration(dict):
         self.config_files = []
         self.cwd: Optional[str] = None
         self.base_paths: list[str] = []
-        self.base_directory: Optional[str] = None
         self.listen: str = "127.0.0.1"
         self.port: int = 8188
         self.enable_cors_header: Optional[str] = None
-        self.enable_compress_response_body: bool = False
         self.max_upload_size: float = 100.0
         self.extra_model_paths_config: Optional[List[str]] = []
         self.output_directory: Optional[str] = None
@@ -164,7 +142,7 @@ class Configuration(dict):
         self.disable_auto_launch: bool = False
         self.cuda_device: Optional[int] = None
         self.cuda_malloc: bool = True
-        self.disable_cuda_malloc: bool = True
+        self.disable_cuda_malloc: bool = False
         self.dont_upcast_attention: bool = False
         self.force_upcast_attention: bool = False
         self.force_fp32: bool = False
@@ -191,7 +169,6 @@ class Configuration(dict):
         self.use_quad_cross_attention: bool = False
         self.use_pytorch_cross_attention: bool = False
         self.use_sage_attention: bool = False
-        self.use_flash_attention: bool = False
         self.disable_xformers: bool = False
         self.gpu_only: bool = False
         self.highvram: bool = False
@@ -199,7 +176,7 @@ class Configuration(dict):
         self.lowvram: bool = False
         self.novram: bool = False
         self.cpu: bool = False
-        self.fast: set[PerformanceFeature] = set()
+        self.fast: bool = False
         self.reserve_vram: Optional[float] = None
         self.disable_smart_memory: bool = False
         self.deterministic: bool = False
@@ -243,7 +220,6 @@ class Configuration(dict):
         self.ideogram_api_key: Optional[str] = None
         self.anthropic_api_key: Optional[str] = None
         self.user_directory: Optional[str] = None
-        self.panic_when: list[str] = []
 
     def __getattr__(self, item):
         if item not in self:

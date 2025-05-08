@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 from . import __version__
 from . import options
 from .cli_args_types import LatentPreviewMethod, Configuration, ConfigurationExtender, ConfigChangeHandler, EnumAction, \
-    EnhancedConfigArgParser, PerformanceFeature, is_valid_directory
+    EnhancedConfigArgParser
 
 # todo: move this
 DEFAULT_VERSION_STRING = "comfyanonymous/ComfyUI@latest"
@@ -35,13 +35,12 @@ def _create_parser() -> EnhancedConfigArgParser:
     parser.add_argument("--enable-cors-header", type=str, default=None, metavar="ORIGIN", nargs="?", const="*",
                         help="Enable CORS (Cross-Origin Resource Sharing) with optional origin or allow all with default '*'.")
     parser.add_argument("--max-upload-size", type=float, default=100, help="Set the maximum upload size in MB.")
-    parser.add_argument("--base-directory", type=str, default=None, help="Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.")
     parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+',
                         action='append', help="Load one or more extra_model_paths.yaml files.")
-    parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory. Overrides --base-directory.")
+    parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory.")
     parser.add_argument("--temp-directory", type=str, default=None,
-                        help="Set the ComfyUI temp directory (default is in the ComfyUI directory). Overrides --base-directory.")
-    parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory. Overrides --base-directory.")
+                        help="Set the ComfyUI temp directory (default is in the ComfyUI directory).")
+    parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory.")
     parser.add_argument("--auto-launch", action="store_true",
                         help="Automatically launch ComfyUI in the default browser.")
     parser.add_argument("--disable-auto-launch", action="store_true", help="Disable auto launching the browser.")
@@ -50,7 +49,7 @@ def _create_parser() -> EnhancedConfigArgParser:
     cm_group = parser.add_mutually_exclusive_group()
     cm_group.add_argument("--cuda-malloc", action="store_true",
                           help="Enable cudaMallocAsync (enabled by default for torch 2.0 and up).")
-    cm_group.add_argument("--disable-cuda-malloc", action="store_true", default=True, help="Disable cudaMallocAsync.")
+    cm_group.add_argument("--disable-cuda-malloc", action="store_true", help="Disable cudaMallocAsync.")
 
     fp_group = parser.add_mutually_exclusive_group()
     fp_group.add_argument("--force-fp32", action="store_true",
@@ -81,7 +80,6 @@ def _create_parser() -> EnhancedConfigArgParser:
                             help="Store text encoder weights in fp8 (e5m2 variant).")
     fpte_group.add_argument("--fp16-text-enc", action="store_true", help="Store text encoder weights in fp16.")
     fpte_group.add_argument("--fp32-text-enc", action="store_true", help="Store text encoder weights in fp32.")
-    fpte_group.add_argument("--bf16-text-enc", action="store_true", help="Store text encoder weights in bf16.")
 
     parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1,
                         help="Use torch-directml.")
@@ -97,7 +95,6 @@ def _create_parser() -> EnhancedConfigArgParser:
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument("--cache-classic", action="store_true", help="WARNING: Unused. Use the old style (aggressive) caching.")
     cache_group.add_argument("--cache-lru", type=int, default=0, help="Use LRU caching with a maximum of N node results cached. May use more RAM/VRAM.")
-    cache_group.add_argument("--cache-none", action="store_true", help="Reduced RAM/VRAM usage at the expense of executing every node for each run.")
     attn_group = parser.add_mutually_exclusive_group()
     attn_group.add_argument("--use-split-cross-attention", action="store_true",
                             help="Use the split cross attention optimization. Ignored when xformers is used.")
@@ -106,7 +103,6 @@ def _create_parser() -> EnhancedConfigArgParser:
     attn_group.add_argument("--use-pytorch-cross-attention", action="store_true",
                             help="Use the new pytorch 2.0 cross attention function.")
     attn_group.add_argument("--use-sage-attention", action="store_true", help="Use sage attention.")
-    attn_group.add_argument("--use-flash-attention", action="store_true", help="Use FlashAttention.")
 
     parser.add_argument("--disable-xformers", action="store_true", help="Disable xformers.")
 
@@ -130,8 +126,7 @@ def _create_parser() -> EnhancedConfigArgParser:
                         help="Force ComfyUI to agressively offload to regular ram instead of keeping models in vram when it can.")
     parser.add_argument("--deterministic", action="store_true",
                         help="Make pytorch use slower deterministic algorithms when it can. Note that this might not make images deterministic in all cases.")
-
-    parser.add_argument("--fast", nargs="*", type=PerformanceFeature, help="Enable some untested and potentially quality deteriorating optimizations. Pass a list specific optimizations if you only want to enable specific ones. Current valid optimizations: fp16_accumulation fp8_matrix_mult cublas_ops", default=set())
+    parser.add_argument("--fast", action="store_true", help="Enable some untested and potentially quality deteriorating optimizations.")
 
     parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
     parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI. Raises an error if nodes cannot be imported,")
@@ -195,16 +190,14 @@ def _create_parser() -> EnhancedConfigArgParser:
         """,
     )
 
-    parser.add_argument(
-        '--panic-when',
-        action='append',
-        help="""
-        List of fully qualified exception class names to panic (sys.exit(1)) when a workflow raises it.
-        Example: --panic-when=torch.cuda.OutOfMemoryError. Can be specified multiple times or as a 
-        comma-separated list.""",
-        type=str,
-        default=[]
-    )
+    def is_valid_directory(path: Optional[str]) -> Optional[str]:
+        """Validate if the given path is a directory."""
+        if path is None:
+            return None
+
+        if not os.path.isdir(path):
+            raise argparse.ArgumentTypeError(f"{path} is not a valid directory.")
+        return path
 
     parser.add_argument(
         "--front-end-root",
@@ -246,9 +239,7 @@ def _create_parser() -> EnhancedConfigArgParser:
         env_var="ANTHROPIC_API_KEY"
     )
 
-    parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path. Overrides --base-directory.")
-
-    parser.add_argument("--enable-compress-response-body", action="store_true", help="Enable compressing response body.")
+    parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path.")
 
     # now give plugins a chance to add configuration
     for entry_point in entry_points().select(group='comfyui.custom_config'):
@@ -281,9 +272,6 @@ def _parse_args(parser: Optional[argparse.ArgumentParser] = None, args_parsing: 
 
     if args.disable_auto_launch:
         args.auto_launch = False
-
-    if args.force_fp16:
-        args.fp16_unet = True
 
     configuration_obj = Configuration(**vars(args))
     configuration_obj.config_files = config_files

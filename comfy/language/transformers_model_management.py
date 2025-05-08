@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import contextlib
 import copy
 import inspect
 import logging
 import operator
 import pathlib
-import weakref
+import warnings
 from functools import reduce
 from typing import Optional, Any, Callable
 
 import torch
-import transformers
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, AutoProcessor, AutoTokenizer, \
     BatchFeature, AutoModelForVision2Seq, AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoModel, \
     PretrainedConfig, TextStreamer, LogitsProcessor
@@ -26,15 +24,7 @@ from ..component_model.tensor_types import RGBImageBatch
 from ..model_downloader import get_or_download_huggingface_repo
 from ..model_management import unet_offload_device, get_torch_device, unet_dtype, load_models_gpu
 from ..model_management_types import ModelManageable
-from ..utils import comfy_tqdm, ProgressBar, comfy_progress, seed_for_block
-
-logger = logging.getLogger(__name__)
-
-# tweaks to support florence 2
-_OVERRIDDEN_MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = list(MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.keys()) + ['florence2']
-
-# should be added if the expectation is that this model emits special tokens
-_DO_NOT_SKIP_SPECIAL_TOKENS = {'florence2', 'paligemma'}
+from ..utils import comfy_tqdm, ProgressBar, comfy_progress, seed_for_block, tensor2pil
 
 
 class TransformersManagedModel(ModelManageable, LanguageModel):
@@ -47,25 +37,22 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             processor: Optional[ProcessorMixin | AutoProcessor] = None
     ):
         self._repo_id = repo_id
-        self._model = model
+        self.model = model
         self._tokenizer = tokenizer
         self._processor = processor
-        self._object_patches: dict[str, Any] = {}
         self._parameter_count = sum(param.nelement() for param in self.model.state_dict().values())
         self._size = sum(param.nelement() * param.element_size() for param in self.model.state_dict().values())
         self.load_device = get_torch_device()
         self.offload_device = unet_offload_device()
         self._config_dict = config_dict
         self._on_set_processor(self._processor)
-        self._model_type = ""
-        self._original_transformers_managed_model: weakref.ReferenceType["TransformersManagedModel"] = weakref.ref(self)
         if model.device != self.offload_device:
             model.to(device=self.offload_device)
 
     @staticmethod
-    def from_pretrained(ckpt_name: str, subfolder: Optional[str] = None, config_dict: PretrainedConfig | dict | None = None) -> "TransformersManagedModel":
+    def from_pretrained(ckpt_name: str, subfolder: Optional[str] = None) -> "TransformersManagedModel":
         hub_kwargs = {}
-        if subfolder is not None and subfolder.strip() != "":
+        if subfolder is not None and subfolder != "":
             hub_kwargs["subfolder"] = subfolder
         repo_id = ckpt_name
         with comfy_tqdm():
@@ -83,10 +70,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             except ImportError:
                 pass
 
-            if config_dict is None:
-                config_dict, _ = PretrainedConfig.get_config_dict(ckpt_name, **hub_kwargs)
-            elif isinstance(config_dict, PretrainedConfig):
-                config_dict: dict = config_dict.to_dict()
+            config_dict, _ = PretrainedConfig.get_config_dict(ckpt_name, **hub_kwargs)
             model_type = config_dict["model_type"]
             # language models prefer to use bfloat16 over float16
             kwargs_to_try = ({"torch_dtype": unet_dtype(supported_dtypes=(torch.bfloat16, torch.float16, torch.float32)),
@@ -101,7 +85,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
                         **kwargs_to_try[0]
                     }
                     kwargs_to_try = (attn_override_kwargs, *kwargs_to_try)
-                    logger.debug(f"while loading model {ckpt_name}, flash_attn was installed, so the flash_attention_2 implementation will be tried")
+                    logging.debug(f"while loading model {ckpt_name}, flash_attn was installed, so the flash_attention_2 implementation will be tried")
             except ImportError:
                 pass
             for i, props in enumerate(kwargs_to_try):
@@ -110,7 +94,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
                         model = AutoModelForVision2Seq.from_pretrained(**from_pretrained_kwargs, **props)
                     elif model_type in MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES:
                         model = AutoModelForSeq2SeqLM.from_pretrained(**from_pretrained_kwargs, **props)
-                    elif model_type in _OVERRIDDEN_MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+                    elif model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
                         model = AutoModelForCausalLM.from_pretrained(**from_pretrained_kwargs, **props)
                     else:
                         model = AutoModel.from_pretrained(**from_pretrained_kwargs, **props)
@@ -120,7 +104,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
                     if i == len(kwargs_to_try) - 1:
                         raise exc_info
                     else:
-                        logger.warning(f"tried to import transformers model {ckpt_name} but got exception when trying additional import args {props}", exc_info=exc_info)
+                        logging.warning(f"tried to import transformers model {ckpt_name} but got exception when trying additional import args {props}", exc_info=exc_info)
                 finally:
                     torch.set_default_dtype(torch.float32)
 
@@ -145,7 +129,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
 
         if model_management.xformers_enabled() and hasattr(model, "enable_xformers_memory_efficient_attention"):
             model.enable_xformers_memory_efficient_attention()
-            logger.debug("enabled xformers memory efficient attention")
+            logging.debug("enabled xformers memory efficient attention")
 
         model_managed = TransformersManagedModel(
             repo_id=repo_id,
@@ -154,8 +138,6 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             config_dict=config_dict,
             processor=processor
         )
-
-        model_managed._model_type = model_type
 
         return model_managed
 
@@ -177,11 +159,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
         # maximizes compatibility with different models
         generate_signature = inspect.signature(transformers_model.generate).parameters
         prepare_signature = inspect.signature(transformers_model.prepare_inputs_for_generation).parameters
-        if hasattr(transformers_model, "forward"):
-            forward_signature = inspect.signature(transformers_model.forward).parameters
-        else:
-            forward_signature = {}
-        to_delete = set(reduce(operator.sub, map(lambda x: x.keys(), [tokens, generate_signature, prepare_signature, forward_signature])))
+        to_delete = set(reduce(operator.sub, map(lambda x: x.keys(), [tokens, generate_signature, prepare_signature])))
         gen_sig_keys = generate_signature.keys()
         if "tgt_lang" in tokens:
             to_delete.add("tgt_lang")
@@ -192,7 +170,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             elif hasattr(tokenizer, "convert_tokens_to_ids"):
                 generate_kwargs["forced_bos_token_id"] = tokenizer.convert_tokens_to_ids(tokens["tgt_lang"])
             else:
-                logger.warning(f"tokenizer {tokenizer} unexpected for translation task")
+                logging.warning(f"tokenizer {tokenizer} unexpected for translation task")
         if "input_ids" in tokens and "inputs" in tokens:
             if "input_ids" in gen_sig_keys:
                 to_delete.add("inputs")
@@ -200,7 +178,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
                 to_delete.add("input_ids")
         for unused_kwarg in to_delete:
             tokens.pop(unused_kwarg)
-            logger.debug(f"{transformers_model.name_or_path}.generate does not accept {unused_kwarg}, removing")
+            logging.debug(f"{transformers_model.name_or_path}.generate does not accept {unused_kwarg}, removing")
 
         # images should be moved to model
         for key in ("images", "pixel_values"):
@@ -229,13 +207,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
 
             text_streamer = _ProgressTextStreamer(on_finalized_text, tokenizer, True)
 
-            try:
-                import triton  # pylint: disable=import-error
-                has_triton = True
-            except (ImportError, ModuleNotFoundError):
-                has_triton = False
-
-            with seed_for_block(seed), torch.inference_mode(mode=True) if has_triton else contextlib.nullcontext():
+            with seed_for_block(seed):
                 if hasattr(inputs, "encodings") and inputs.encodings is not None and all(hasattr(encoding, "attention_mask") for encoding in inputs.encodings) and "attention_mask" in inputs:
                     inputs.pop("attention_mask")
                 output_ids = transformers_model.generate(
@@ -257,7 +229,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             prev_src_lang = None
         # todo: is this redundant consider I'm decoding in the on_finalized_text block?
         try:
-            outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=self._model_type not in _DO_NOT_SKIP_SPECIAL_TOKENS, clean_up_tokenization_spaces=False)
+            outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         finally:
             if prev_src_lang is not None:
                 tokenizer.src_lang = prev_src_lang
@@ -331,6 +303,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
     def model_dtype(self) -> torch.dtype:
         return self.model.dtype
 
+
     def patch_model(self, device_to: torch.device | None = None, lowvram_model_memory: int = 0, load_weights: bool = True, force_patch_weights: bool = False) -> torch.nn.Module:
         return self.model.to(device=device_to)
 
@@ -350,7 +323,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             processor.image_processor.do_rescale = False
 
     def tokenize(self, prompt: str | LanguagePrompt, images: RGBImageBatch | None, chat_template: str | None = None) -> ProcessorResult:
-        tokenizer = self.processor if self.processor is not None else self.tokenizer
+        tokenizer = self.tokenizer
         assert tokenizer is not None
         assert hasattr(tokenizer, "decode")
 
@@ -360,16 +333,15 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             candidate_chat_templates = [(name, template) for name, template in KNOWN_CHAT_TEMPLATES.items() if name in self.config_dict["_name_or_path"] or name in self.model.name_or_path]
             if len(candidate_chat_templates) > 0:
                 filename, chat_template = candidate_chat_templates[0]
-                logger.debug(f"Selected chat template filename={filename} for {self.model.name_or_path}")
+                logging.debug(f"Selected chat template filename={filename} for {self.model.name_or_path}")
         if isinstance(images, list):
             images = torch.stack(images, dim=0)
         if images is not None:
+            # PIL it for the sake of simplicity
             image_sizes = [(image.shape[-2], image.shape[-3]) for image in images]
         else:
             image_sizes = []
-            # todo: what is the best choice for this?
-            # probably select a size that related to the vision tower?
-            images = torch.zeros((0, 0, 0, 3))
+            images = []
 
         try:
             if hasattr(tokenizer, "apply_chat_template"):
@@ -396,7 +368,7 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
                     ]
                 prompt = tokenizer.apply_chat_template(messages, chat_template=chat_template, add_generation_prompt=True, tokenize=False)
         except Exception as exc:
-            logger.debug("Could not apply chat template", exc_info=exc)
+            logging.debug("Could not apply chat template", exc_info=exc)
 
         if self.processor is None and isinstance(prompt, str):
             batch_encoding = tokenizer(prompt, return_tensors="pt").to(device=self.load_device)
@@ -404,32 +376,19 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
         else:
             if hasattr(self.processor, "to"):
                 self.processor.to(device=self.load_device)
-            # convert tuple to list from images.unbind() for paligemma workaround
-            image_tensor_list = list(images.unbind()) if images is not None and len(images) > 0 else None
-            try:
-                batch_feature: BatchFeature = self.processor(text=[prompt], images=image_tensor_list, return_tensors="pt", padding=True)
-            except TypeError as exc_info:
-                logger.warning(f"Exception while trying to run processor. Your transformers package is version {transformers.__version__} and may need to be updated")
-                raise exc_info
+
+            batch_feature: BatchFeature = self.processor(text=[prompt], images=images.unbind(), return_tensors="pt", padding=True)
             if hasattr(self.processor, "to"):
                 self.processor.to(device=self.offload_device)
             assert "input_ids" in batch_feature
-            try:
-                batch_feature.to(device=self.load_device, dtype=self.model_dtype())
-            except TypeError:
-                # works around Pixtral processor bug
-                batch_feature.to(self.load_device)
-                batch_feature.to(self.model_dtype())
+            batch_feature.to(device=self.load_device, dtype=self.model_dtype())
             # noinspection PyTypeChecker
-            batch_feature_dict = {
+            return {
+                "image_sizes": image_sizes,
+                "images": batch_feature["pixel_values"],
                 "inputs": batch_feature["input_ids"],
                 **batch_feature
             }
-            if "pixel_values" in batch_feature and "image_sizes" not in batch_feature_dict:
-                batch_feature_dict["image_sizes"] = image_sizes
-            if "pixel_values" in batch_feature and "images" not in batch_feature_dict:
-                batch_feature_dict["images"] = batch_feature["pixel_values"]
-            return batch_feature_dict
 
     @property
     def repo_id(self) -> str:
@@ -441,28 +400,6 @@ class TransformersManagedModel(ModelManageable, LanguageModel):
             return f"<TransformersManagedModel for {'/'.join(repo_id_as_path.parts[-2:])} ({self.model.__class__.__name__})>"
         else:
             return f"<TransformersManagedModel for {self.model.__class__.__name__}>"
-
-    def clone(self) -> TransformersManagedModel:
-        m = copy.copy(self)
-        # deep copy a few objects
-        m._object_patches = copy.copy(self._object_patches)
-        return m
-
-    def add_object_patch(self, name: str, obj: Any):
-        # for the sake of compatibility, rewrite the name to the actual model field
-        if name == "diffusion_model":
-            name = "model"
-
-        self._object_patches[name] = obj
-
-    def get_model_object(self, name: str) -> torch.nn.Module:
-        if name == "diffusion_model":
-            name = "model"
-        return super().get_model_object(name)
-
-    @property
-    def model(self) -> PreTrainedModel | torch.nn.Module:
-        return self._object_patches.get("model", self._model)
 
 
 class _ProgressTextStreamer(TextStreamer):

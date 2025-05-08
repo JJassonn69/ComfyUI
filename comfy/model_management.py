@@ -32,7 +32,7 @@ import torch
 from opentelemetry.trace import get_current_span
 
 from . import interruption
-from .cli_args import args, PerformanceFeature
+from .cli_args import args
 from .cmd.main_pre import tracer
 from .component_model.deprecation import _deprecate_method
 from .model_management_types import ModelManageable
@@ -68,41 +68,11 @@ cpu_state = CPUState.GPU
 
 total_vram = 0
 
-
-def get_supported_float8_types():
-    float8_types = []
-    try:
-        float8_types.append(torch.float8_e4m3fn)
-    except:
-        pass
-    try:
-        float8_types.append(torch.float8_e4m3fnuz)
-    except:
-        pass
-    try:
-        float8_types.append(torch.float8_e5m2)
-    except:
-        pass
-    try:
-        float8_types.append(torch.float8_e5m2fnuz)
-    except:
-        pass
-    try:
-        float8_types.append(torch.float8_e8m0fnu)
-    except:
-        pass
-    return float8_types
-
-
-FLOAT8_TYPES = get_supported_float8_types()
-
 xpu_available = False
 torch_version = ""
 try:
     torch_version = torch.version.__version__
-    temp = torch_version.split(".")
-    torch_version_numeric = (int(temp[0]), int(temp[1]))
-    xpu_available = (torch_version_numeric[0] < 2 or (torch_version_numeric[0] == 2 and torch_version_numeric[1] <= 4)) and torch.xpu.is_available()
+    xpu_available = (int(torch_version[0]) < 2 or (int(torch_version[0]) == 2 and int(torch_version[2]) <= 4)) and torch.xpu.is_available()
 except:
     pass
 
@@ -147,14 +117,6 @@ try:
 except:
     npu_available = False
 
-try:
-    import torch_mlu  # pylint: disable=import-error, noqa: F401
-
-    _ = torch.mlu.device_count()
-    mlu_available = torch.mlu.is_available()
-except:
-    mlu_available = False
-
 if args.cpu:
     cpu_state = CPUState.CPU
 
@@ -175,13 +137,6 @@ def is_ascend_npu():
     return False
 
 
-def is_mlu():
-    global mlu_available
-    if mlu_available:
-        return True
-    return False
-
-
 def get_torch_device():
     global directml_device
     global cpu_state
@@ -196,8 +151,6 @@ def get_torch_device():
             return torch.device("xpu", torch.xpu.current_device())
         elif is_ascend_npu():
             return torch.device("npu", torch.npu.current_device())
-        elif is_mlu():
-            return torch.device("mlu", torch.mlu.current_device())
         else:
             try:
                 return torch.device(f"cuda:{torch.cuda.current_device()}")
@@ -227,12 +180,6 @@ def get_total_memory(dev=None, torch_total_too=False):
             _, mem_total_npu = torch.npu.mem_get_info(dev)
             mem_total_torch = mem_reserved
             mem_total = mem_total_npu
-        elif is_mlu():
-            stats = torch.mlu.memory_stats(dev)
-            mem_reserved = stats['reserved_bytes.all.current']
-            _, mem_total_mlu = torch.mlu.mem_get_info(dev)
-            mem_total_torch = mem_reserved
-            mem_total = mem_total_mlu
         else:
             stats = torch.cuda.memory_stats(dev)
             mem_reserved = stats['reserved_bytes.all.current']
@@ -245,13 +192,6 @@ def get_total_memory(dev=None, torch_total_too=False):
         return mem_total
 
 
-def mac_version():
-    try:
-        return tuple(int(n) for n in platform.mac_ver()[0].split("."))
-    except:
-        return None
-
-
 # we're required to call get_device_name early on to initialize the methods get_total_memory will call
 if torch.cuda.is_available() and hasattr(torch.version, "hip") and torch.version.hip is not None:
     logger.info(f"Detected HIP device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
@@ -261,9 +201,6 @@ logger.debug("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, to
 
 try:
     logger.debug("pytorch version: {}".format(torch_version))
-    mac_ver = mac_version()
-    if mac_ver is not None:
-        logging.info("Mac Version {}".format(mac_ver))
 except:
     pass
 
@@ -322,7 +259,7 @@ def is_amd():
 
 MIN_WEIGHT_MEMORY_RATIO = 0.4
 if is_nvidia():
-    MIN_WEIGHT_MEMORY_RATIO = 0.0
+    MIN_WEIGHT_MEMORY_RATIO = 0.1
 
 ENABLE_PYTORCH_ATTENTION = False
 if args.use_pytorch_cross_attention:
@@ -331,23 +268,12 @@ if args.use_pytorch_cross_attention:
 
 try:
     if is_nvidia() or is_amd():
-        if torch_version_numeric[0] >= 2:
+        if int(torch_version[0]) >= 2:
             if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
                 ENABLE_PYTORCH_ATTENTION = True
-    if is_intel_xpu() or is_ascend_npu() or is_mlu():
+    if is_intel_xpu() or is_ascend_npu():
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
-except:
-    pass
-
-try:
-    if is_amd():
-        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
-        logging.info("AMD arch: {}".format(arch))
-        if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
-            if torch_version_numeric[0] >= 2 and torch_version_numeric[1] >= 7:  # works on 2.6 but doesn't actually seem to improve much
-                if any((a in arch) for a in ["gfx1100", "gfx1101"]):  # TODO: more arches
-                    ENABLE_PYTORCH_ATTENTION = True
 except:
     pass
 
@@ -356,17 +282,8 @@ if ENABLE_PYTORCH_ATTENTION:
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
-PRIORITIZE_FP16 = False  # TODO: remove and replace with something that shows exactly which dtype is faster than the other
 try:
-    if is_nvidia() and PerformanceFeature.Fp16Accumulation in args.fast:
-        torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        PRIORITIZE_FP16 = True  # TODO: limit to cards where it actually boosts performance
-        logging.info("Enabled fp16 accumulation.")
-except:
-    pass
-
-try:
-    if torch_version_numeric[0] == 2 and torch_version_numeric[1] >= 5:
+    if int(torch_version[0]) == 2 and int(torch_version[2]) >= 5:
         torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(True)  # pylint: disable=no-member
 except:
     logging.warning("Warning, could not set allow_fp16_bf16_reduction_math_sdp")
@@ -426,8 +343,6 @@ def get_torch_device_name(device):
         return "{} {}".format(device, torch.xpu.get_device_name(device))
     elif is_ascend_npu():
         return "{} {}".format(device, torch.npu.get_device_name(device))
-    elif is_mlu():
-        return "{} {}".format(device, torch.mlu.get_device_name(device))
     else:
         return "CUDA {}: {}".format(device, torch.cuda.get_device_name(device))
 
@@ -470,7 +385,7 @@ class LoadedModel:
             self._set_model(model)
 
     @property
-    def model(self) -> ModelManageable:
+    def model(self):
         return self._model()
 
     def model_memory(self):
@@ -636,7 +551,6 @@ def load_models_gpu(models: Sequence[ModelManageable], memory_required: int = 0,
         _load_models_gpu(models, memory_required, force_patch_weights, minimum_memory_required, force_full_load)
         to_load = list(map(str, models))
         span.set_attribute("models", to_load)
-        logger.debug(f"Loaded {to_load}")
 
 
 def _load_models_gpu(models: Sequence[ModelManageable], memory_required: int = 0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False) -> None:
@@ -704,7 +618,7 @@ def _load_models_gpu(models: Sequence[ModelManageable], memory_required: int = 0
             loaded_memory = loaded_model.model_loaded_memory()
             current_free_mem = get_free_memory(torch_dev) + loaded_memory
 
-            lowvram_model_memory = max(128 * 1024 * 1024, (current_free_mem - minimum_memory_required), min(current_free_mem * MIN_WEIGHT_MEMORY_RATIO, current_free_mem - minimum_inference_memory()))
+            lowvram_model_memory = max(64 * 1024 * 1024, (current_free_mem - minimum_memory_required), min(current_free_mem * MIN_WEIGHT_MEMORY_RATIO, current_free_mem - minimum_inference_memory()))
             lowvram_model_memory = max(0.1, lowvram_model_memory - loaded_memory)
 
         if vram_set_state == VRAMState.NO_VRAM:
@@ -712,7 +626,7 @@ def _load_models_gpu(models: Sequence[ModelManageable], memory_required: int = 0
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
-        logger.debug(f"Loaded {loaded_model}")
+        logger.info(f"Loaded {loaded_model}")
 
     span = get_current_span()
     span.set_attribute("models_to_load", list(map(str, models_to_load)))
@@ -810,7 +724,7 @@ def maximum_vram_for_weights(device=None) -> int:
     return get_total_memory(device) * 0.88 - minimum_inference_memory()
 
 
-def unet_dtype(device=None, model_params=0, supported_dtypes=(torch.float16, torch.bfloat16, torch.float32), weight_dtype: Optional[torch.dtype] = None):
+def unet_dtype(device=None, model_params=0, supported_dtypes=(torch.float16, torch.bfloat16, torch.float32)):
     if model_params < 0:
         model_params = 1000000000000000000000
     if args.fp32_unet:
@@ -827,8 +741,13 @@ def unet_dtype(device=None, model_params=0, supported_dtypes=(torch.float16, tor
         return torch.float8_e5m2
 
     fp8_dtype = None
-    if weight_dtype in FLOAT8_TYPES:
-        fp8_dtype = weight_dtype
+    try:
+        for dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            if dtype in supported_dtypes:
+                fp8_dtype = dtype
+                break
+    except:
+        pass
 
     if fp8_dtype is not None:
         if supports_fp8_compute(device):  # if fp8 compute is supported the casting is most likely not expensive
@@ -837,10 +756,6 @@ def unet_dtype(device=None, model_params=0, supported_dtypes=(torch.float16, tor
         free_model_memory = maximum_vram_for_weights(device)
         if model_params * 2 > free_model_memory:
             return fp8_dtype
-
-    if PRIORITIZE_FP16 or weight_dtype == torch.float16:
-        if torch.float16 in supported_dtypes and should_use_fp16(device=device, model_params=model_params):
-            return torch.float16
 
     for dt in supported_dtypes:
         if dt == torch.float16 and should_use_fp16(device=device, model_params=model_params):
@@ -875,9 +790,6 @@ def unet_manual_cast(weight_dtype, inference_device, supported_dtypes=(torch.flo
         return None
 
     fp16_supported = should_use_fp16(inference_device, prioritize_performance=True)
-    if PRIORITIZE_FP16 and fp16_supported and torch.float16 in supported_dtypes:
-        return torch.float16
-
     for dt in supported_dtypes:
         if dt == torch.float16 and fp16_supported:
             return torch.float16
@@ -928,8 +840,6 @@ def text_encoder_dtype(device=None):
         return torch.float8_e5m2
     elif args.fp16_text_enc:
         return torch.float16
-    elif args.bf16_text_enc:
-        return torch.bfloat16
     elif args.fp32_text_enc:
         return torch.float32
 
@@ -1076,8 +986,14 @@ def sage_attention_enabled():
     return args.use_sage_attention
 
 
-def flash_attention_enabled():
-    return args.use_flash_attention
+FLASH_ATTENTION_ENABLED = False
+if not args.disable_flash_attn:
+    try:
+        import flash_attn
+
+        FLASH_ATTENTION_ENABLED = True
+    except ImportError:
+        pass
 
 
 def xformers_enabled():
@@ -1088,8 +1004,6 @@ def xformers_enabled():
     if is_intel_xpu():
         return False
     if is_ascend_npu():
-        return False
-    if is_mlu():
         return False
     if directml_device:
         return False
@@ -1105,7 +1019,7 @@ def flash_attn_enabled():
         return False
     if directml_device:
         return False
-    return flash_attention_enabled()
+    return FLASH_ATTENTION_ENABLED
 
 
 def xformers_enabled_vae():
@@ -1121,12 +1035,6 @@ def pytorch_attention_enabled():
     return ENABLE_PYTORCH_ATTENTION
 
 
-def pytorch_attention_enabled_vae():
-    if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
-    return pytorch_attention_enabled()
-
-
 def pytorch_attention_flash_attention():
     global ENABLE_PYTORCH_ATTENTION
     if ENABLE_PYTORCH_ATTENTION:
@@ -1137,22 +1045,25 @@ def pytorch_attention_flash_attention():
             return True
         if is_ascend_npu():
             return True
-        if is_mlu():
-            return True
-        if is_amd():
-            return True  # if you have pytorch attention enabled on AMD it probably supports at least mem efficient attention
     return False
+
+
+def mac_version() -> Optional[tuple[int, ...]]:
+    try:
+        return tuple(int(n) for n in platform.mac_ver()[0].split("."))
+    except:
+        return None
 
 
 def force_upcast_attention_dtype():
     upcast = args.force_upcast_attention
 
     macos_version = mac_version()
-    if macos_version is not None and ((14, 5) <= macos_version < (16,)):  # black image bug on recent versions of macOS
+    if macos_version is not None and ((14, 5) <= macos_version <= (15, 2)):  # black image bug on recent versions of macOS
         upcast = True
 
     if upcast:
-        return {torch.float16: torch.float32}
+        return torch.float32
     else:
         return None
 
@@ -1183,13 +1094,6 @@ def get_free_memory(dev=None, torch_free_too=False):
             mem_free_npu, _ = torch.npu.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_npu + mem_free_torch
-        elif is_mlu():
-            stats = torch.mlu.memory_stats(dev)
-            mem_active = stats['active_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_mlu, _ = torch.mlu.mem_get_info(dev)
-            mem_free_torch = mem_reserved - mem_active
-            mem_free_total = mem_free_mlu + mem_free_torch
         else:
             stats = torch.cuda.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
@@ -1233,27 +1137,21 @@ def is_device_cuda(device):
     return is_device_type(device, 'cuda')
 
 
-def is_directml_enabled():
-    global directml_device
-    if directml_device is not None:
-        return True
-
-    return False
-
-
 def should_use_fp16(device=None, model_params=0, prioritize_performance=True, manual_cast=False):
+    global directml_device
+
     if device is not None:
         if is_device_cpu(device):
             return False
 
-    if args.force_fp16:
+    if FORCE_FP16:
         return True
 
     if FORCE_FP32:
         return False
 
-    if is_directml_enabled():
-        return True
+    if directml_device:
+        return False
 
     if (device is not None and is_device_mps(device)) or mps_mode():
         return True
@@ -1265,9 +1163,6 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         return True
 
     if is_ascend_npu():
-        return True
-
-    if is_mlu():
         return True
 
     if is_amd():
@@ -1337,16 +1232,6 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
     if is_intel_xpu():
         return True
 
-    if is_ascend_npu():
-        return True
-
-    if is_amd():
-        arch = torch.cuda.get_device_properties(device).gcnArchName
-        if any((a in arch) for a in ["gfx1030", "gfx1031", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]):  # RDNA2 and older don't support bf16
-            if manual_cast:
-                return True
-            return False
-
     try:
         props_major = min(torch.cuda.get_device_properties(torch.device(f"cuda:{i}")).major for i in range(torch.cuda.device_count()))
         if props_major >= 8:
@@ -1360,7 +1245,7 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
 
     bf16_works = torch.cuda.is_bf16_supported()
 
-    if bf16_works and manual_cast:
+    if bf16_works or manual_cast:
         free_model_memory = maximum_vram_for_weights(device)
         if (not prioritize_performance) or model_params * 4 > free_model_memory:
             return True
@@ -1384,11 +1269,11 @@ def supports_fp8_compute(device=None):
     if props.minor < 9:
         return False
 
-    if torch_version_numeric[0] < 2 or (torch_version_numeric[0] == 2 and torch_version_numeric[1] < 3):
+    if int(torch_version[0]) < 2 or (int(torch_version[0]) == 2 and int(torch_version[2]) < 3):
         return False
 
     if WINDOWS:
-        if (torch_version_numeric[0] == 2 and torch_version_numeric[1] < 4):
+        if (int(torch_version[0]) == 2 and int(torch_version[2]) < 4):
             return False
 
     return True
@@ -1407,8 +1292,6 @@ def _soft_empty_cache(force=False):
         torch.xpu.empty_cache()  # pylint: disable=no-member
     elif is_ascend_npu():
         torch.npu.empty_cache()  # pylint: disable=no-member
-    elif is_mlu():
-        torch.mlu.empty_cache()  # pylint: disable=no-member
     elif torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()

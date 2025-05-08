@@ -27,7 +27,7 @@ class ProcessorResult(TypedDict):
     attention_mask: NotRequired[torch.Tensor]
     pixel_values: NotRequired[torch.Tensor]
     images: NotRequired[RGBImageBatch]
-    inputs: NotRequired[BatchEncoding | list[str] | LanguagePrompt]
+    inputs: NotRequired[BatchEncoding | list[str]]
     image_sizes: NotRequired[torch.Tensor]
 
 

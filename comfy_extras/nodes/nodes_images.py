@@ -15,8 +15,7 @@ from comfy.nodes.base_nodes import ImageScale
 from comfy.nodes.common import MAX_RESOLUTION
 from comfy.nodes.package_typing import CustomNode
 from comfy_extras.constants.resolutions import SDXL_SD3_FLUX_RESOLUTIONS, LTVX_RESOLUTIONS, SD_RESOLUTIONS, \
-    IDEOGRAM_RESOLUTIONS, COSMOS_RESOLUTIONS, HUNYUAN_VIDEO_RESOLUTIONS, WAN_VIDEO_14B_RESOLUTIONS, \
-    WAN_VIDEO_1_3B_RESOLUTIONS, WAN_VIDEO_14B_EXTENDED_RESOLUTIONS
+    IDEOGRAM_RESOLUTIONS
 
 
 def levels_adjustment(image: ImageBatch, black_level: float = 0.0, mid_level: float = 0.5, white_level: float = 1.0, clip: bool = True) -> ImageBatch:
@@ -274,11 +273,8 @@ class ImageResize:
             "required": {
                 "image": ("IMAGE",),
                 "resize_mode": (["cover", "contain", "auto"], {"default": "cover"}),
-                "resolutions": (["SDXL/SD3/Flux", "SD1.5", "LTXV", "Ideogram", "Cosmos", "HunyuanVideo", "WAN 14b", "WAN 1.3b", "WAN 14b with extras"], {"default": "SDXL/SD3/Flux"}),
-                "interpolation": (ImageScale.upscale_methods, {"default": "lanczos"}),
-            },
-            "optional": {
-                "aspect_ratio_tolerance": ("FLOAT", {"min": 0, "max": 1.0, "default": 0.05, "step": 0.001})
+                "resolutions": (["SDXL/SD3/Flux", "SD1.5", "LTXV", "Ideogram"], {"default": "SDXL/SD3/Flux"}),
+                "interpolation": (ImageScale.upscale_methods, {"default": "bilinear"}),
             }
         }
 
@@ -286,40 +282,24 @@ class ImageResize:
     FUNCTION = "resize_image"
     CATEGORY = "image/transform"
 
-    def resize_image(self, image: RGBImageBatch, resize_mode: Literal["cover", "contain", "auto"], resolutions: Literal["SDXL/SD3/Flux", "SD1.5"], interpolation: str, aspect_ratio_tolerance=0.05) -> tuple[RGBImageBatch]:
+    def resize_image(self, image: RGBImageBatch, resize_mode: Literal["cover", "contain", "auto"], resolutions: Literal["SDXL/SD3/Flux", "SD1.5"], interpolation: str) -> Tuple[RGBImageBatch]:
         if resolutions == "SDXL/SD3/Flux":
             supported_resolutions = SDXL_SD3_FLUX_RESOLUTIONS
-        elif resolutions == "LTXV":
+        elif resolutions == "ltxv":
             supported_resolutions = LTVX_RESOLUTIONS
-        elif resolutions == "Ideogram":
+        elif resolutions == "ideogram":
             supported_resolutions = IDEOGRAM_RESOLUTIONS
-        elif resolutions == "Cosmos":
-            supported_resolutions = COSMOS_RESOLUTIONS
-        elif resolutions == "HunyuanVideo":
-            supported_resolutions = HUNYUAN_VIDEO_RESOLUTIONS
-        elif resolutions == "WAN 14b":
-            supported_resolutions = WAN_VIDEO_14B_RESOLUTIONS
-        elif resolutions == "WAN 1.3b":
-            supported_resolutions = WAN_VIDEO_1_3B_RESOLUTIONS
-        elif resolutions == "WAN 14b with extras":
-            supported_resolutions = WAN_VIDEO_14B_EXTENDED_RESOLUTIONS
         else:
             supported_resolutions = SD_RESOLUTIONS
-        return self.resize_image_with_supported_resolutions(image, resize_mode, supported_resolutions, interpolation, aspect_ratio_tolerance=aspect_ratio_tolerance)
+        return self.resize_image_with_supported_resolutions(image, resize_mode, supported_resolutions, interpolation)
 
-    def resize_image_with_supported_resolutions(self, image: RGBImageBatch, resize_mode: Literal["cover", "contain", "auto"], supported_resolutions: list[tuple[int, int]], interpolation: str, aspect_ratio_tolerance=0.05) -> tuple[RGBImageBatch]:
+    def resize_image_with_supported_resolutions(self, image: RGBImageBatch, resize_mode: Literal["cover", "contain", "auto"], supported_resolutions: list[tuple[int, int]], interpolation: str):
         resized_images = []
         for img in image:
             h, w = img.shape[:2]
             current_aspect_ratio = w / h
-
-
-            aspect_ratio_diffs = [(abs(res[0] / res[1] - current_aspect_ratio), res) for res in supported_resolutions]
-            min_diff = min(aspect_ratio_diffs, key=lambda x: x[0])[0]
-            close_enough_resolutions = [res for diff, res in aspect_ratio_diffs if diff <= min_diff + aspect_ratio_tolerance]
-
-            # pick the highest resolution from the filtered set
-            target_resolution = max(close_enough_resolutions, key=lambda res: res[0] * res[1])
+            target_resolution = min(supported_resolutions,
+                                    key=lambda res: abs(res[0] / res[1] - current_aspect_ratio))
 
             if resize_mode == "cover":
                 scale = max(target_resolution[0] / w, target_resolution[1] / h)
@@ -335,6 +315,8 @@ class ImageResize:
 
             # convert to b, c, h, w
             img_tensor = img.permute(2, 0, 1).unsqueeze(0)
+
+            # Use common_upscale for resizing
             resized = utils.common_upscale(img_tensor, new_w, new_h, interpolation, "disabled")
 
             # handle padding or cropping
@@ -359,26 +341,6 @@ class ImageResize:
             resized_images.append(resized.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0))
 
         return (torch.stack(resized_images),)
-
-
-class ImageResize1(ImageResize):
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "resize_mode": (["cover", "contain", "auto"], {"default": "cover"}),
-                "width": ("INT", {"min": 1}),
-                "height": ("INT", {"min": 1}),
-                "interpolation": (ImageScale.upscale_methods, {"default": "lanczos"}),
-            }
-        }
-
-    FUNCTION = "execute"
-    RETURN_TYPES = ("IMAGE",)
-
-    def execute(self, image: RGBImageBatch, resize_mode: Literal["cover", "contain", "auto"], width: int, height: int, interpolation: str) -> tuple[RGBImageBatch]:
-        return self.resize_image_with_supported_resolutions(image, resize_mode, [(width, height)], interpolation)
 
 
 class ImageLevels(CustomNode):
@@ -430,7 +392,6 @@ class ImageLuminance:
 
 NODE_CLASS_MAPPINGS = {
     "ImageResize": ImageResize,
-    "ImageResize1": ImageResize1,
     "ImageShape": ImageShape,
     "ImageCrop": ImageCrop,
     "ImageLevels": ImageLevels,
@@ -442,6 +403,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ImageResize": "Fit Image to Diffusion Size",
-    "ImageResize1": "Fit Image to Width Height"
+    "ImageResize": "Fit Image to Diffusion Size"
 }

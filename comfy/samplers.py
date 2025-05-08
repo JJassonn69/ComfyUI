@@ -24,13 +24,6 @@ from .model_management_types import ModelOptions
 from .model_patcher import ModelPatcher
 from .sampler_names import SCHEDULER_NAMES, SAMPLER_NAMES
 
-logger = logging.getLogger(__name__)
-
-
-def add_area_dims(area, num_dims):
-    while (len(area) // 2) < num_dims:
-        area = [2147483648] + area[:len(area) // 2] + [0] + area[len(area) // 2:]
-    return area
 
 def get_area_and_mult(conds, x_in, timestep_in):
     dims = tuple(x_in.shape[2:])
@@ -47,10 +40,6 @@ def get_area_and_mult(conds, x_in, timestep_in):
             return None
     if 'area' in conds:
         area = list(conds['area'])
-        area = add_area_dims(area, len(dims))
-        if (len(area) // 2) > len(dims):
-            area = area[:len(dims)] + area[len(area) // 2:(len(area) // 2) + len(dims)]
-
     if 'strength' in conds:
         strength = conds['strength']
 
@@ -81,9 +70,8 @@ def get_area_and_mult(conds, x_in, timestep_in):
     mult = mask * strength
 
     if 'mask' not in conds and area is not None:
-        fuzz = 8
+        rr = 8
         for i in range(len(dims)):
-            rr = min(fuzz, mult.shape[2 + i] // 4)
             if area[len(dims) + i] != 0:
                 for t in range(rr):
                     m = mult.narrow(i + 2, t, 1)
@@ -592,37 +580,25 @@ def resolve_areas_and_cond_masks(conditions, h, w, device):
     return resolve_areas_and_cond_masks_multidim(conditions, [h, w], device)
 
 
-def create_cond_with_same_area_if_none(conds, c):
+def create_cond_with_same_area_if_none(conds, c):  # TODO: handle dim != 2
     if 'area' not in c:
         return
-
-    def area_inside(a, area_cmp):
-        a = add_area_dims(a, len(area_cmp) // 2)
-        area_cmp = add_area_dims(area_cmp, len(a) // 2)
-
-        a_l = len(a) // 2
-        area_cmp_l = len(area_cmp) // 2
-        for i in range(min(a_l, area_cmp_l)):
-            if a[a_l + i] < area_cmp[area_cmp_l + i]:
-                return False
-        for i in range(min(a_l, area_cmp_l)):
-            if (a[i] + a[a_l + i]) > (area_cmp[i] + area_cmp[area_cmp_l + i]):
-                return False
-        return True
 
     c_area = c['area']
     smallest = None
     for x in conds:
         if 'area' in x:
             a = x['area']
-            if area_inside(c_area, a):
-                if smallest is None:
-                    smallest = x
-                elif 'area' not in smallest:
-                    smallest = x
-                else:
-                    if math.prod(smallest['area'][:len(smallest['area']) // 2]) > math.prod(a[:len(a) // 2]):
-                        smallest = x
+            if c_area[2] >= a[2] and c_area[3] >= a[3]:
+                if a[0] + a[2] >= c_area[0] + c_area[2]:
+                    if a[1] + a[3] >= c_area[1] + c_area[3]:
+                        if smallest is None:
+                            smallest = x
+                        elif 'area' not in smallest:
+                            smallest = x
+                        else:
+                            if smallest['area'][0] * smallest['area'][1] > a[0] * a[1]:
+                                smallest = x
         else:
             if smallest is None:
                 smallest = x
@@ -743,6 +719,13 @@ class Sampler:
         max_sigma = float(model_wrap.inner_model.model_sampling.sigma_max)
         sigma = float(sigmas[0])
         return math.isclose(max_sigma, sigma, rel_tol=1e-05) or sigma > max_sigma
+
+
+KSAMPLER_NAMES = ["euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp", "heun", "heunpp2", "dpm_2", "dpm_2_ancestral",
+                  "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_sde", "dpmpp_sde_gpu",
+                  "dpmpp_2m", "dpmpp_2m_cfg_pp", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu", "ddpm", "lcm",
+                  "ipndm", "ipndm_v", "deis", "res_multistep", "res_multistep_cfg_pp", "gradient_estimation"]
+
 
 class KSAMPLER(Sampler):
     def __init__(self, sampler_function, extra_options={}, inpaint_options={}):
@@ -1041,10 +1024,6 @@ class CFGGuider:
                 patcher_extension.get_all_wrappers(patcher_extension.WrappersMP.OUTER_SAMPLE, self.model_options, is_model_options=True)
             )
             output = executor.execute(noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
-        except ValueError as exc_info:
-            if "fp8e4nv" in str(exc_info):
-                logger.error(f"Load the weights for model {self.model_patcher} as fp8_e5m2 to use floating point 8-bit inference with torch.compile and triton on Ampere architecture")
-            raise exc_info
         finally:
             cast_to_load_options(self.model_options, device=self.model_patcher.offload_device)
             self.model_options = orig_model_options
@@ -1087,7 +1066,7 @@ def calculate_sigmas(model_sampling: object, scheduler_name: str, steps: int) ->
     handler = SCHEDULER_HANDLERS.get(scheduler_name)
     if handler is None:
         err = f"error invalid scheduler {scheduler_name}"
-        logger.error(err)
+        logging.error(err)
         raise ValueError(err)
     if handler.use_ms:
         return handler.handler(model_sampling, steps)
@@ -1115,7 +1094,7 @@ class KSampler:
         self.model = model
         self.device = device
         if scheduler not in self.SCHEDULERS:
-            sheduler = self.SCHEDULERS[0]
+            scheduler = self.SCHEDULERS[0]
         if sampler not in self.SAMPLERS:
             sampler = self.SAMPLERS[0]
         self.scheduler = scheduler

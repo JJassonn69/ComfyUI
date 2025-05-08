@@ -117,11 +117,8 @@ class Flux(nn.Module):
         vec = vec + self.vector_in(y[:, :self.params.vec_in_dim])
         txt = self.txt_in(txt)
 
-        if img_ids is not None:
-            ids = torch.cat((txt_ids, img_ids), dim=1)
-            pe = self.pe_embedder(ids)
-        else:
-            pe = None
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
 
         blocks_replace = patches_replace.get("dit", {})
         for i, block in enumerate(self.double_blocks):

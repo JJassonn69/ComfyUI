@@ -2,12 +2,10 @@ import torch
 
 import comfy.model_management
 import comfy.utils
-from comfy.node_helpers import export_custom_nodes
 from comfy.nodes.common import MAX_RESOLUTION
-from comfy.nodes.package_typing import CustomNode
 
 
-class EmptyCosmosLatentVideo(CustomNode):
+class EmptyCosmosLatentVideo:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"width": ("INT", {"default": 1280, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
@@ -36,7 +34,7 @@ def vae_encode_with_padding(vae, image, width, height, length, padding=0):
     return latent_temp[:, :, :latent_len]
 
 
-class CosmosImageToVideoLatent(CustomNode):
+class CosmosImageToVideoLatent:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"vae": ("VAE",),
@@ -79,4 +77,7 @@ class CosmosImageToVideoLatent(CustomNode):
         return (out_latent,)
 
 
-export_custom_nodes()
+NODE_CLASS_MAPPINGS = {
+    "EmptyCosmosLatentVideo": EmptyCosmosLatentVideo,
+    "CosmosImageToVideoLatent": CosmosImageToVideoLatent,
+}

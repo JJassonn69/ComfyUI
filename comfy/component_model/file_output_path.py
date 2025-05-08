@@ -13,7 +13,6 @@ def file_output_path(filename: str, type: Literal["input", "output", "temp"] = "
     :param filename:
     :param type:
     :param subfolder:
-    :raises FileNotFoundError: if the path does not have a file
     :return:
     """
     filename, output_dir = folder_paths.annotated_filepath(str(filename))
@@ -24,9 +23,8 @@ def file_output_path(filename: str, type: Literal["input", "output", "temp"] = "
         raise ValueError(f"no such output directory because invalid type specified (type={type})")
     output_dir = Path(output_dir)
     # seems to misbehave
-    subfolder = subfolder or ""
     subfolder = subfolder.replace("\\", "/")
-    subfolder = Path(subfolder)
+    subfolder = Path(subfolder or "")
     try:
         relative_to = (output_dir / subfolder / filename).relative_to(output_dir)
     except ValueError:

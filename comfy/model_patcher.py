@@ -39,7 +39,7 @@ from .float import stochastic_rounding
 from .hooks import EnumHookMode, _HookRef, HookGroup, EnumHookType, WeightHook, create_transformer_options_from_hooks
 from .lora_types import PatchDict, PatchDictKey, PatchTuple, PatchWeightTuple, ModelPatchesDictValue
 from .model_base import BaseModel
-from .model_management_types import ModelManageable, MemoryMeasurements, ModelOptions, LatentFormatT, LoadingListItem
+from .model_management_types import ModelManageable, MemoryMeasurements, ModelOptions, LatentFormatT
 from .patcher_extension import CallbacksMP, WrappersMP, PatcherInjection
 
 logger = logging.getLogger(__name__)
@@ -112,28 +112,8 @@ def wipe_lowvram_weight(m):
     if hasattr(m, "prev_comfy_cast_weights"):
         m.comfy_cast_weights = m.prev_comfy_cast_weights
         del m.prev_comfy_cast_weights
-
-    if hasattr(m, "weight_function"):
-        m.weight_function = []
-
-    if hasattr(m, "bias_function"):
-        m.bias_function = []
-
-def move_weight_functions(m, device):
-    if device is None:
-        return 0
-
-    memory = 0
-    if hasattr(m, "weight_function"):
-        for f in m.weight_function:
-            if hasattr(f, "move_to"):
-                memory += f.move_to(device=device)
-
-    if hasattr(m, "bias_function"):
-        for f in m.bias_function:
-            if hasattr(f, "move_to"):
-                memory += f.move_to(device=device)
-    return memory
+    m.weight_function = None
+    m.bias_function = None
 
 
 class LowVramPatch:
@@ -227,13 +207,11 @@ class ModelPatcher(ModelManageable):
         self.backup = {}
         self.object_patches = {}
         self.object_patches_backup = {}
-        self.weight_wrapper_patches = {}
         self._model_options: ModelOptions = {"transformer_options": {}}
         self.model_size()
         self.load_device = load_device
         self.offload_device = offload_device
         self.weight_inplace_update = weight_inplace_update
-        self._force_cast_weights = False
         self._parent: ModelManageable | None = None
         self.patches_uuid: uuid.UUID = uuid.uuid4()
         self.ckpt_name = ckpt_name
@@ -284,16 +262,11 @@ class ModelPatcher(ModelManageable):
     def parent(self) -> Optional["ModelPatcher"]:
         return self._parent
 
-    @property
-    def force_cast_weights(self) -> bool:
-        return self._force_cast_weights
-
-    @force_cast_weights.setter
-    def force_cast_weights(self, value:bool) -> None:
-        self._force_cast_weights = value
-
     def lowvram_patch_counter(self):
         return self._memory_measurements.lowvram_patch_counter
+
+        if not hasattr(self.model, 'current_weight_patches_uuid'):
+            self.model.current_weight_patches_uuid = None
 
     def model_size(self):
         if self.size > 0:
@@ -314,13 +287,10 @@ class ModelPatcher(ModelManageable):
         n.patches_uuid = self.patches_uuid
 
         n.object_patches = self.object_patches.copy()
-        n.weight_wrapper_patches = self.weight_wrapper_patches.copy()
         n._model_options = copy.deepcopy(self.model_options)
         n.backup = self.backup
         n.object_patches_backup = self.object_patches_backup
         n._parent = self
-
-        n.force_cast_weights = self.force_cast_weights
 
         # attachments
         n.attachments = {}
@@ -467,16 +437,6 @@ class ModelPatcher(ModelManageable):
 
     def add_object_patch(self, name, obj):
         self.object_patches[name] = obj
-
-    def set_model_compute_dtype(self, dtype):
-        self.add_object_patch("manual_cast_dtype", dtype)
-        if dtype is not None:
-            self.force_cast_weights = True
-        self.patches_uuid = uuid.uuid4() #TODO: optimize by preventing a full model reload for this
-
-    def add_weight_wrapper(self, name, function):
-        self.weight_wrapper_patches[name] = self.weight_wrapper_patches.get(name, []) + [function]
-        self.patches_uuid = uuid.uuid4()
 
     def get_model_object(self, name: str) -> torch.nn.Module | typing.Any:
         """Retrieves a nested attribute from an object using dot notation considering
@@ -627,8 +587,7 @@ class ModelPatcher(ModelManageable):
         else:
             set_func(out_weight, inplace_update=inplace_update, seed=string_to_seed(key))
 
-
-    def _load_list(self) -> list[LoadingListItem]:
+    def _load_list(self):
         loading = []
         for n, m in self.model.named_modules():
             params = []
@@ -640,7 +599,7 @@ class ModelPatcher(ModelManageable):
                     skip = True  # skip random weights in non leaf modules
                     break
             if not skip and (hasattr(m, "comfy_cast_weights") or len(params) > 0):
-                loading.append(LoadingListItem(model_management.module_size(m), n, m, params))
+                loading.append((model_management.module_size(m), n, m, params))
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
@@ -651,18 +610,15 @@ class ModelPatcher(ModelManageable):
             lowvram_counter = 0
             loading = self._load_list()
 
-            load_completely: list[LoadingListItem] = []
+            load_completely = []
             loading.sort(reverse=True)
             for x in loading:
-                n = x.name
-                m = x.module
-                params = x.params
-                module_mem = x.module_size
+                n = x[1]
+                m = x[2]
+                params = x[3]
+                module_mem = x[0]
 
                 lowvram_weight = False
-
-                weight_key = "{}.weight".format(n)
-                bias_key = "{}.bias".format(n)
 
                 if not full_load and hasattr(m, "comfy_cast_weights"):
                     if mem_counter + module_mem >= lowvram_model_memory:
@@ -671,51 +627,39 @@ class ModelPatcher(ModelManageable):
                         if hasattr(m, "prev_comfy_cast_weights"):  # Already lowvramed
                             continue
 
-                cast_weight = self.force_cast_weights
-                if lowvram_weight:
-                    if hasattr(m, "comfy_cast_weights"):
-                        m.weight_function = []
-                        m.bias_function = []
+                weight_key = "{}.weight".format(n)
+                bias_key = "{}.bias".format(n)
 
+                if lowvram_weight:
                     if weight_key in self.patches:
                         if force_patch_weights:
                             self.patch_weight_to_device(weight_key)
                         else:
-                            m.weight_function = [LowVramPatch(weight_key, self.patches)]
+                            m.weight_function = LowVramPatch(weight_key, self.patches)
                             patch_counter += 1
                     if bias_key in self.patches:
                         if force_patch_weights:
                             self.patch_weight_to_device(bias_key)
                         else:
-                            m.bias_function = [LowVramPatch(bias_key, self.patches)]
+                            m.bias_function = LowVramPatch(bias_key, self.patches)
                             patch_counter += 1
 
-                    cast_weight = True
+                    m.prev_comfy_cast_weights = m.comfy_cast_weights
+                    m.comfy_cast_weights = True
                 else:
                     if hasattr(m, "comfy_cast_weights"):
-                        wipe_lowvram_weight(m)
+                        if m.comfy_cast_weights:
+                            wipe_lowvram_weight(m)
 
                     if full_load or mem_counter + module_mem < lowvram_model_memory:
                         mem_counter += module_mem
-                        load_completely.append(LoadingListItem(module_mem, n, m, params))
-
-                if cast_weight and hasattr(m, "comfy_cast_weights"):
-                    m.prev_comfy_cast_weights = m.comfy_cast_weights
-                    m.comfy_cast_weights = True
-
-                if weight_key in self.weight_wrapper_patches:
-                    m.weight_function.extend(self.weight_wrapper_patches[weight_key])
-
-                if bias_key in self.weight_wrapper_patches:
-                    m.bias_function.extend(self.weight_wrapper_patches[bias_key])
-
-                mem_counter += move_weight_functions(m, device_to)
+                        load_completely.append((module_mem, n, m, params))
 
             load_completely.sort(reverse=True)
             for x in load_completely:
-                n = x.name
-                m = x.module
-                params = x.params
+                n = x[1]
+                m = x[2]
+                params = x[3]
                 if hasattr(m, "comfy_patched_weights"):
                     if m.comfy_patched_weights == True:
                         continue
@@ -727,7 +671,7 @@ class ModelPatcher(ModelManageable):
                 m.comfy_patched_weights = True
 
             for x in load_completely:
-                x.module.to(device_to)
+                x[2].to(device_to)
 
             if lowvram_counter > 0:
                 logger.debug("loaded partially {} {} {}".format(lowvram_model_memory / (1024 * 1024), mem_counter / (1024 * 1024), patch_counter))
@@ -773,7 +717,6 @@ class ModelPatcher(ModelManageable):
             self.unpatch_hooks()
             if self._memory_measurements.model_lowvram:
                 for m in self.model.modules():
-                    move_weight_functions(m, device_to)
                     wipe_lowvram_weight(m)
 
                 self._memory_measurements.model_lowvram = False
@@ -792,9 +735,7 @@ class ModelPatcher(ModelManageable):
             self.backup.clear()
 
             if device_to is not None:
-                if hasattr(self.model, "to"):
-                    # todo: is this now redundant with self.model.to?
-                    self.model.to(device_to)
+                self.model.to(device_to)
                 self.model_device = device_to
             self._memory_measurements.model_loaded_weight_memory = 0
 
@@ -810,7 +751,6 @@ class ModelPatcher(ModelManageable):
 
     def partially_unload(self, device_to, memory_to_free=0):
         with self.use_ejected():
-            hooks_unpatched = False
             memory_freed = 0
             patch_counter = 0
             unload_list = self._load_list()
@@ -834,10 +774,6 @@ class ModelPatcher(ModelManageable):
                                 move_weight = False
                                 break
 
-                            if not hooks_unpatched:
-                                self.unpatch_hooks()
-                                hooks_unpatched = True
-
                             if bk.inplace_update:
                                 utils.copy_to_param(self.model, key, bk.weight)
                             else:
@@ -847,19 +783,15 @@ class ModelPatcher(ModelManageable):
                     weight_key = "{}.weight".format(n)
                     bias_key = "{}.bias".format(n)
                     if move_weight:
-                        cast_weight = self.force_cast_weights
                         m.to(device_to)
-                        module_mem += move_weight_functions(m, device_to)
                         if lowvram_possible:
                             if weight_key in self.patches:
-                                m.weight_function.append(LowVramPatch(weight_key, self.patches))
+                                m.weight_function = LowVramPatch(weight_key, self.patches)
                                 patch_counter += 1
                             if bias_key in self.patches:
-                                m.bias_function.append(LowVramPatch(bias_key, self.patches))
+                                m.bias_function = LowVramPatch(bias_key, self.patches)
                                 patch_counter += 1
-                            cast_weight = True
 
-                        if cast_weight:
                             m.prev_comfy_cast_weights = m.comfy_cast_weights
                             m.comfy_cast_weights = True
                         m.comfy_patched_weights = False
@@ -913,10 +845,7 @@ class ModelPatcher(ModelManageable):
 
     def __str__(self):
         if hasattr(self.model, "operations"):
-            if hasattr(self.model.operations, "__name__"):
-                operations_str = self.model.operations.__name__
-            else:
-                operations_str = str(self.model.operations)
+            operations_str = self.model.operations.__name__
         else:
             operations_str = None
         info_str = f"model_dtype={self.model_dtype()} device={self.model_device} size={naturalsize(self._memory_measurements.model_loaded_weight_memory, binary=True)} operations={operations_str}"
@@ -1174,6 +1103,7 @@ class ModelPatcher(ModelManageable):
 
     def patch_hooks(self, hooks: HookGroup | None):
         with self.use_ejected():
+            self.unpatch_hooks()
             if hooks is not None:
                 model_sd_keys = list(self.model_state_dict().keys())
                 memory_counter = None
@@ -1184,16 +1114,12 @@ class ModelPatcher(ModelManageable):
                 # if have cached weights for hooks, use it
                 cached_weights = self.cached_hook_patches.get(hooks, None)
                 if cached_weights is not None:
-                    model_sd_keys_set = set(model_sd_keys)
                     for key in cached_weights:
                         if key not in model_sd_keys:
                             logging.warning(f"Cached hook could not patch. Key does not exist in model: {key}")
                             continue
                         self.patch_cached_hook_weights(cached_weights=cached_weights, key=key, memory_counter=memory_counter)
-                        model_sd_keys_set.remove(key)
-                    self.unpatch_hooks(model_sd_keys_set)
                 else:
-                    self.unpatch_hooks()
                     relevant_patches = self.get_combined_hook_patches(hooks=hooks)
                     original_weights = None
                     if len(relevant_patches) > 0:
@@ -1204,8 +1130,6 @@ class ModelPatcher(ModelManageable):
                             continue
                         self.patch_hook_weight_to_device(hooks=hooks, combined_patches=relevant_patches, key=key, original_weights=original_weights,
                                                          memory_counter=memory_counter)
-            else:
-                self.unpatch_hooks()
             self.current_hooks = hooks
 
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
@@ -1262,20 +1186,14 @@ class ModelPatcher(ModelManageable):
         del out_weight
         del weight
 
-    def unpatch_hooks(self, whitelist_keys_set: set[str]=None) -> None:
+    def unpatch_hooks(self) -> None:
         with self.use_ejected():
             if len(self.hook_backup) == 0:
                 self.current_hooks = None
                 return
             keys = list(self.hook_backup.keys())
-            if whitelist_keys_set:
-                for k in keys:
-                    if k in whitelist_keys_set:
-                        utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
-                        self.hook_backup.pop(k)
-            else:
-                for k in keys:
-                    utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
+            for k in keys:
+                utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
             self.hook_backup.clear()
             self.current_hooks = None
 

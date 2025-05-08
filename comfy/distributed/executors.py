@@ -1,3 +1,4 @@
+import concurrent
 import contextvars
 import typing
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -17,4 +18,7 @@ class ContextVarExecutor(ThreadPoolExecutor):
 
 
 class ContextVarProcessPoolExecutor(ProcessPoolExecutor):
-    pass
+
+    def submit(self, fn, /, *args, **kwargs) -> concurrent.futures.Future:
+        # TODO: serialize the "comfyui_execution_context"
+        pass

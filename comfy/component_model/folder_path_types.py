@@ -13,10 +13,9 @@ from typing import Any, NamedTuple, Optional, Iterable
 
 from .platform_path import construct_path
 
-supported_pt_extensions = frozenset(['.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft' ".index.json"])
+supported_pt_extensions = frozenset(['.ckpt', '.pt', '.bin', '.pth', '.safetensors', '.pkl', '.sft', ".index.json"])
 extension_mimetypes_cache = {
     "webp": "image",
-    "fbx": "model",
 }
 
 logger = logging.getLogger(__name__)
@@ -122,7 +121,6 @@ class PathsList:
     def __len__(self):
         p: FolderNames = self.parent()
         return len(list(p.directory_paths(self.folder_name)))
-
 
 @dataclasses.dataclass
 class SupportedExtensions:

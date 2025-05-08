@@ -41,14 +41,12 @@ def _execute_prompt(
     span_context: Context = propagate.extract(span_context)
     token = attach(span_context)
     try:
-        # there is never an event loop running on a thread or process pool thread here
-        # this also guarantees nodes will be able to successfully call await
-        return asyncio.run(__execute_prompt(prompt, prompt_id, client_id, span_context, progress_handler, configuration))
+        return __execute_prompt(prompt, prompt_id, client_id, span_context, progress_handler, configuration)
     finally:
         detach(token)
 
 
-async def __execute_prompt(
+def __execute_prompt(
         prompt: dict,
         prompt_id: str,
         client_id: str,
@@ -71,8 +69,7 @@ async def __execute_prompt(
             args.update(configuration)
 
         with tracer.start_as_current_span("Initialize Prompt Executor", context=span_context):
-            # todo: deal with new caching features
-            prompt_executor = PromptExecutor(progress_handler)
+            prompt_executor = PromptExecutor(progress_handler, lru_size=configuration.cache_lru if configuration is not None else 0)
             prompt_executor.raise_exceptions = True
             _prompt_executor.executor = prompt_executor
 

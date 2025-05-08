@@ -25,9 +25,9 @@ from .. import sd
 from .. import utils
 from ..cli_args import args
 from ..cmd import folder_paths, latent_preview
-from ..comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
+from ..comfy_types import IO, ComfyNodeABC, InputTypeDict
 from ..component_model.deprecation import _deprecate_method
-from ..component_model.tensor_types import RGBImage, RGBImageBatch, MaskBatch, RGBAImageBatch
+from ..component_model.tensor_types import RGBImage, RGBImageBatch, MaskBatch
 from ..execution_context import current_execution_context
 from ..images import open_image
 from ..interruption import interrupt_current_processing
@@ -481,7 +481,7 @@ class SaveLatent:
 
         file = f"{filename}_{counter:05}_.latent"
 
-        results: list[FileLocator] = []
+        results = list()
         results.append({
             "filename": file,
             "subfolder": subfolder,
@@ -491,7 +491,7 @@ class SaveLatent:
         file = os.path.join(full_output_folder, file)
 
         output = {}
-        output["latent_tensor"] = samples["samples"].contiguous()
+        output["latent_tensor"] = samples["samples"]
         output["latent_format_version_0"] = torch.tensor([])
 
         utils.save_torch_file(output, file, metadata=metadata)
@@ -774,7 +774,6 @@ class VAELoader:
             vae_path = get_or_download("vae", vae_name, KNOWN_VAES)
             sd_ = utils.load_torch_file(vae_path)
         vae = sd.VAE(sd=sd_)
-        vae.throw_exception_if_invalid()
         return (vae,)
 
 class ControlNetLoader:
@@ -790,8 +789,6 @@ class ControlNetLoader:
     def load_controlnet(self, control_net_name):
         controlnet_path = get_or_download("controlnet", control_net_name, KNOWN_CONTROLNETS)
         controlnet_ = controlnet.load_controlnet(controlnet_path)
-        if controlnet is None:
-            raise RuntimeError("ERROR: controlnet file is invalid and does not contain a valid controlnet model.")
         return (controlnet_,)
 
 
@@ -949,7 +946,7 @@ class CLIPLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": (get_filename_list_with_downloadable("text_encoders", KNOWN_CLIP_MODELS),),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -959,10 +956,26 @@ class CLIPLoader:
 
     CATEGORY = "advanced/loaders"
 
-    DESCRIPTION = "[Recipes]\n\nstable_diffusion: clip-l\nstable_cascade: clip-g\nsd3: t5 xxl/ clip-g / clip-l\nstable_audio: t5 base\nmochi: t5 xxl\ncosmos: old t5 xxl\nlumina2: gemma 2 2B\nwan: umt5 xxl\n hidream: llama-3.1 (Recommend) or t5"
+    DESCRIPTION = "[Recipes]\n\nstable_diffusion: clip-l\nstable_cascade: clip-g\nsd3: t5 / clip-g / clip-l\nstable_audio: t5\nmochi: t5\ncosmos: old t5 xxl"
 
     def load_clip(self, clip_name, type="stable_diffusion", device="default"):
-        clip_type = getattr(sd.CLIPType, type.upper(), sd.CLIPType.STABLE_DIFFUSION)
+        clip_type = sd.CLIPType.STABLE_DIFFUSION
+        if type == "stable_cascade":
+            clip_type = sd.CLIPType.STABLE_CASCADE
+        elif type == "sd3":
+            clip_type = sd.CLIPType.SD3
+        elif type == "stable_audio":
+            clip_type = sd.CLIPType.STABLE_AUDIO
+        elif type == "mochi":
+            clip_type = sd.CLIPType.MOCHI
+        elif type == "ltxv":
+            clip_type = sd.CLIPType.LTXV
+        elif type == "pixart":
+            clip_type = sd.CLIPType.PIXART
+        elif type == "cosmos":
+            clip_type = sd.CLIPType.COSMOS
+        else:
+            logging.warning(f"Unknown clip type argument passed: {type} for model {clip_name}")
 
         model_options = {}
         if device == "cpu":
@@ -977,7 +990,7 @@ class DualCLIPLoader:
     def INPUT_TYPES(s):
         return {"required": { "clip_name1": (get_filename_list_with_downloadable("text_encoders"),), "clip_name2": (
             get_filename_list_with_downloadable("text_encoders"),),
-                              "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream"], ),
+                              "type": (["sdxl", "sd3", "flux", "hunyuan_video"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -987,12 +1000,21 @@ class DualCLIPLoader:
 
     CATEGORY = "advanced/loaders"
 
-    DESCRIPTION = "[Recipes]\n\nsdxl: clip-l, clip-g\nsd3: clip-l, clip-g / clip-l, t5 / clip-g, t5\nflux: clip-l, t5\nhidream: at least one of t5 or llama, recommended t5 and llama"
+    DESCRIPTION = "[Recipes]\n\nsdxl: clip-l, clip-g\nsd3: clip-l, clip-g / clip-l, t5 / clip-g, t5\nflux: clip-l, t5"
 
     def load_clip(self, clip_name1, clip_name2, type, device="default"):
-        clip_type = getattr(sd.CLIPType, type.upper(), sd.CLIPType.STABLE_DIFFUSION)
         clip_path1 = get_or_download("text_encoders", clip_name1)
         clip_path2 = get_or_download("text_encoders", clip_name2)
+        if type == "sdxl":
+            clip_type = sd.CLIPType.STABLE_DIFFUSION
+        elif type == "sd3":
+            clip_type = sd.CLIPType.SD3
+        elif type == "flux":
+            clip_type = sd.CLIPType.FLUX
+        elif type == "hunyuan_video":
+            clip_type = sd.CLIPType.HUNYUAN_VIDEO
+        else:
+            raise ValueError(f"Unknown clip type argument passed: {type} for model {clip_name1} and {clip_name2}")
 
         model_options = {}
         if device == "cpu":
@@ -1014,8 +1036,6 @@ class CLIPVisionLoader:
     def load_clip(self, clip_name):
         clip_path = get_or_download("clip_vision", clip_name, KNOWN_CLIP_VISION_MODELS)
         clip_vision = clip_vision_module.load(clip_path)
-        if clip_vision is None:
-            raise RuntimeError("ERROR: clip vision file is invalid and does not contain a valid vision model.")
         return (clip_vision,)
 
 class CLIPVisionEncode:
@@ -1081,11 +1101,10 @@ class StyleModelApply:
         for t in conditioning:
             (txt, keys) = t
             keys = keys.copy()
-            # even if the strength is 1.0 (i.e, no change), if there's already a mask, we have to add to it
-            if "attention_mask" in keys or (strength_type == "attn_bias" and strength != 1.0):
+            if strength_type == "attn_bias" and strength != 1.0:
                 # math.log raises an error if the argument is zero
                 # torch.log returns -inf, which is what we want
-                attn_bias = torch.log(torch.Tensor([strength if strength_type == "attn_bias" else 1.0]))
+                attn_bias = torch.log(torch.Tensor([strength]))
                 # get the size of the mask image
                 mask_ref_size = keys.get("attention_mask_img_shape", (1, 1))
                 n_ref = mask_ref_size[0] * mask_ref_size[1]
@@ -1534,7 +1553,7 @@ class KSampler:
         return {
             "required": {
                 "model": ("MODEL", {"tooltip": "The model used for denoising the input latent."}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "tooltip": "The random seed used for creating the noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "The random seed used for creating the noise."}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "The number of steps used in the denoising process."}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step":0.1, "round": 0.01, "tooltip": "The Classifier-Free Guidance scale balances creativity and adherence to the prompt. Higher values result in images more closely matching the prompt however too high values will negatively impact quality."}),
                 "sampler_name": (samplers.KSampler.SAMPLERS, {"tooltip": "The algorithm used when sampling, this can affect the quality, speed, and style of the generated output."}),
@@ -1562,7 +1581,7 @@ class KSamplerAdvanced:
         return {"required":
                     {"model": ("MODEL",),
                     "add_noise": (["enable", "disable"], ),
-                    "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
+                    "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step":0.1, "round": 0.01}),
                     "sampler_name": (samplers.KSampler.SAMPLERS, ),
@@ -1667,7 +1686,6 @@ class LoadImage:
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
         files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
         return {
             "required": {
                 "image": (natsorted(files), {"image_upload": True}),
@@ -1712,9 +1730,6 @@ class LoadImage:
                 image = torch.from_numpy(image)[None,]
                 if 'A' in i.getbands():
                     mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
-                    mask = 1. - torch.from_numpy(mask)
-                elif i.mode == 'P' and 'transparency' in i.info:
-                    mask = np.array(i.convert('RGBA').getchannel('A')).astype(np.float32) / 255.0
                     mask = 1. - torch.from_numpy(mask)
                 else:
                     mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
@@ -1777,29 +1792,6 @@ class LoadImageMask:
             return "Invalid image file: {}".format(image)
 
         return True
-
-
-class LoadImageOutput(LoadImage):
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("COMBO", {
-                    "image_upload": True,
-                    "image_folder": "output",
-                    "remote": {
-                        "route": "/internal/files/output",
-                        "refresh_button": True,
-                        "control_after_refresh": "first",
-                    },
-                }),
-            }
-        }
-
-    DESCRIPTION = "Load an image from the output folder. When the refresh button is clicked, the node will update the image list and automatically select the first image, allowing for easy iteration."
-    EXPERIMENTAL = True
-    FUNCTION = "load_image"
-
 
 class ImageScale:
     upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
@@ -1925,35 +1917,35 @@ class ImagePadForOutpaint:
 
     CATEGORY = "image"
 
-    def expand_image(self, image: RGBImageBatch | RGBAImageBatch, left, top, right, bottom, feathering) -> tuple[RGBImageBatch | RGBAImageBatch, MaskBatch]:
-        batch, height, width, channels = image.size()
+    def expand_image(self, image, left, top, right, bottom, feathering):
+        d1, d2, d3, d4 = image.size()
 
         new_image = torch.ones(
-            (batch, height + top + bottom, width + left + right, channels),
+            (d1, d2 + top + bottom, d3 + left + right, d4),
             dtype=torch.float32,
         ) * 0.5
 
-        new_image[:, top:top + height, left:left + width, :] = image
+        new_image[:, top:top + d2, left:left + d3, :] = image
 
         mask = torch.ones(
-            (batch, height + top + bottom, width + left + right),
+            (d2 + top + bottom, d3 + left + right),
             dtype=torch.float32,
         )
 
         t = torch.zeros(
-            (height, width),
+            (d2, d3),
             dtype=torch.float32
         )
 
-        if feathering > 0 and feathering * 2 < height and feathering * 2 < width:
+        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
 
-            for i in range(height):
-                for j in range(width):
-                    dt = i if top != 0 else height
-                    db = height - i if bottom != 0 else height
+            for i in range(d2):
+                for j in range(d3):
+                    dt = i if top != 0 else d2
+                    db = d2 - i if bottom != 0 else d2
 
-                    dl = j if left != 0 else width
-                    dr = width - j if right != 0 else width
+                    dl = j if left != 0 else d3
+                    dr = d3 - j if right != 0 else d3
 
                     d = min(dt, db, dl, dr)
 
@@ -1964,9 +1956,9 @@ class ImagePadForOutpaint:
 
                     t[i, j] = v * v
 
-        mask[:, top:top + height, left:left + width] = t
+        mask[top:top + d2, left:left + d3] = t
 
-        return new_image, mask
+        return (new_image, mask)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1987,7 +1979,6 @@ NODE_CLASS_MAPPINGS = {
     "PreviewImage": PreviewImage,
     "LoadImage": LoadImage,
     "LoadImageMask": LoadImageMask,
-    "LoadImageOutput": LoadImageOutput,
     "ImageScale": ImageScale,
     "ImageScaleBy": ImageScaleBy,
     "ImageInvert": ImageInvert,
@@ -2090,7 +2081,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PreviewImage": "Preview Image",
     "LoadImage": "Load Image",
     "LoadImageMask": "Load Image (as Mask)",
-    "LoadImageOutput": "Load Image (from Outputs)",
     "ImageScale": "Upscale Image",
     "ImageScaleBy": "Upscale Image By",
     "ImageUpscaleWithModel": "Upscale Image (using Model)",

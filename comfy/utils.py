@@ -70,6 +70,7 @@ else:
     logging.debug("Warning, you are using an old pytorch version and some ckpt/pt files might be loaded unsafely. Upgrading to 2.4 or above is recommended.")
 
 
+
 # deprecate PROGRESS_BAR_ENABLED
 def _get_progress_bar_enabled():
     warnings.warn(
@@ -83,27 +84,21 @@ def _get_progress_bar_enabled():
 setattr(sys.modules[__name__], 'PROGRESS_BAR_ENABLED', property(_get_progress_bar_enabled))
 
 
-def load_torch_file(ckpt: str, safe_load=False, device=None, return_metadata=False):
+def load_torch_file(ckpt: str, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
     if ckpt is None:
         raise FileNotFoundError("the checkpoint was not found")
-    metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            with safetensors.safe_open(Path(ckpt).resolve(strict=True), framework="pt", device=device.type) as f:
-                sd = {}
-                for k in f.keys():
-                    sd[k] = f.get_tensor(k)
-                if return_metadata:
-                    metadata = f.metadata()
+            sd = safetensors.torch.load_file(Path(ckpt).resolve(strict=True), device=device.type)
         except Exception as e:
             if len(e.args) > 0:
                 message = e.args[0]
                 if "HeaderTooLarge" in message:
                     raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
                 if "MetadataIncompleteBuffer" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
             raise e
     elif ckpt.lower().endswith("index.json"):
         # from accelerate
@@ -153,7 +148,7 @@ def load_torch_file(ckpt: str, safe_load=False, device=None, return_metadata=Fal
                 else:
                     logger.error(msg, exc_info=exc_info)
             raise exc_info
-    return (sd, metadata) if return_metadata else sd
+    return sd
 
 
 def save_torch_file(sd, ckpt, metadata=None):
@@ -1233,12 +1228,6 @@ def pil2tensor(image: Image) -> torch.Tensor:
 
 def tensor2pil(t_image: torch.Tensor) -> Image:
     return Image.fromarray(np.clip(255.0 * t_image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-
-
-def pil2mask(image):
-    image_np = np.array(image.convert("L")).astype(np.float32) / 255.0
-    mask = torch.from_numpy(image_np)
-    return 1.0 - mask
 
 
 def reshape_mask(input_mask, output_shape):

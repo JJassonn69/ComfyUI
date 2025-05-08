@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.resources
 import logging
 import os
 import re
@@ -17,16 +16,9 @@ from typing_extensions import NotRequired
 
 from ..cli_args import DEFAULT_VERSION_STRING
 from ..cmd.folder_paths import add_model_folder_path  # pylint: disable=import-error
+from ..component_model.files import get_package_as_path
 
 REQUEST_TIMEOUT = 10  # seconds
-
-
-def check_frontend_version():
-    return None
-
-
-def frontend_install_warning_message() -> str:
-    return ""
 
 
 class Asset(TypedDict):
@@ -120,36 +112,8 @@ def download_release_asset_zip(release: Release, destination_path: str) -> None:
 
 
 class FrontendManager:
+    DEFAULT_FRONTEND_PATH = get_package_as_path('comfy', 'web/')
     CUSTOM_FRONTENDS_ROOT = add_model_folder_path("web_custom_versions", extensions=set())
-
-    @classmethod
-    def default_frontend_path(cls) -> str:
-        try:
-            import comfyui_frontend_package
-
-            return str(importlib.resources.files(comfyui_frontend_package) / "static")
-        except ImportError:
-            logging.error(f"""comfyui-frontend-package is not installed.""".strip())
-            return ""
-
-    @classmethod
-    def templates_path(cls) -> str:
-        try:
-            import comfyui_workflow_templates
-
-            return str(
-                importlib.resources.files(comfyui_workflow_templates) / "templates"
-            )
-        except ImportError:
-            logging.error(
-                f"""
-********** ERROR ***********
-
-comfyui-workflow-templates is not installed.
-
-********** ERROR ***********
-""".strip()
-            )
 
     @classmethod
     def parse_version_string(cls, value: str) -> tuple[str, str, str]:
@@ -171,9 +135,7 @@ comfyui-workflow-templates is not installed.
         return match_result.group(1), match_result.group(2), match_result.group(3)
 
     @classmethod
-    def init_frontend_unsafe(
-            cls, version_string: str, provider: Optional[FrontEndProvider] = None
-    ) -> str:
+    def init_frontend_unsafe(cls, version_string: str, provider: Optional[FrontEndProvider] = None) -> str:
         """
         Initializes the frontend for the specified version.
 
@@ -189,26 +151,17 @@ comfyui-workflow-templates is not installed.
             main error source might be request timeout or invalid URL.
         """
         if version_string == DEFAULT_VERSION_STRING:
-            check_frontend_version()
-            return cls.default_frontend_path()
+            return cls.DEFAULT_FRONTEND_PATH
 
         repo_owner, repo_name, version = cls.parse_version_string(version_string)
 
         if version.startswith("v"):
-            expected_path = str(
-                Path(cls.CUSTOM_FRONTENDS_ROOT)
-                / f"{repo_owner}_{repo_name}"
-                / version.lstrip("v")
-            )
+            expected_path = str(Path(cls.CUSTOM_FRONTENDS_ROOT) / f"{repo_owner}_{repo_name}" / version.lstrip("v"))
             if os.path.exists(expected_path):
-                logging.info(
-                    f"Using existing copy of specific frontend version tag: {repo_owner}/{repo_name}@{version}"
-                )
+                logging.info(f"Using existing copy of specific frontend version tag: {repo_owner}/{repo_name}@{version}")
                 return expected_path
 
-        logging.info(
-            f"Initializing frontend: {repo_owner}/{repo_name}@{version}, requesting version details from GitHub..."
-        )
+        logging.info(f"Initializing frontend: {repo_owner}/{repo_name}@{version}, requesting version details from GitHub...")
 
         provider = provider or FrontEndProvider(repo_owner, repo_name)
         release = provider.get_release(version)
@@ -251,5 +204,4 @@ comfyui-workflow-templates is not installed.
         except Exception as e:
             logging.error("Failed to initialize frontend: %s", e)
             logging.info("Falling back to the default frontend.")
-            check_frontend_version()
-            return cls.default_frontend_path()
+            return cls.DEFAULT_FRONTEND_PATH

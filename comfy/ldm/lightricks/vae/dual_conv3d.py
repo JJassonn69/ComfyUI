@@ -18,13 +18,11 @@ class DualConv3d(nn.Module):
         dilation: Union[int, Tuple[int, int, int]] = 1,
         groups=1,
         bias=True,
-        padding_mode="zeros",
     ):
         super(DualConv3d, self).__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.padding_mode = padding_mode
         # Ensure kernel_size, stride, padding, and dilation are tuples of length 3
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size, kernel_size)
@@ -110,7 +108,6 @@ class DualConv3d(nn.Module):
             self.padding1,
             self.dilation1,
             self.groups,
-            padding_mode=self.padding_mode,
         )
 
         if skip_time_conv:
@@ -125,7 +122,6 @@ class DualConv3d(nn.Module):
             self.padding2,
             self.dilation2,
             self.groups,
-            padding_mode=self.padding_mode,
         )
 
         return x
@@ -141,16 +137,7 @@ class DualConv3d(nn.Module):
         stride1 = (self.stride1[1], self.stride1[2])
         padding1 = (self.padding1[1], self.padding1[2])
         dilation1 = (self.dilation1[1], self.dilation1[2])
-        x = F.conv2d(
-            x,
-            weight1,
-            self.bias1,
-            stride1,
-            padding1,
-            dilation1,
-            self.groups,
-            padding_mode=self.padding_mode,
-        )
+        x = F.conv2d(x, weight1, self.bias1, stride1, padding1, dilation1, self.groups)
 
         _, _, h, w = x.shape
 
@@ -167,16 +154,7 @@ class DualConv3d(nn.Module):
         stride2 = self.stride2[0]
         padding2 = self.padding2[0]
         dilation2 = self.dilation2[0]
-        x = F.conv1d(
-            x,
-            weight2,
-            self.bias2,
-            stride2,
-            padding2,
-            dilation2,
-            self.groups,
-            padding_mode=self.padding_mode,
-        )
+        x = F.conv1d(x, weight2, self.bias2, stride2, padding2, dilation2, self.groups)
         x = rearrange(x, "(b h w) c d -> b c d h w", b=b, h=h, w=w)
 
         return x

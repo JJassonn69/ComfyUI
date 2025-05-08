@@ -1,34 +1,26 @@
 import copy
-from pathlib import Path
 
 import sentencepiece
 import torch
 
 
 class SPieceTokenizer:
-    @staticmethod
-    def from_pretrained(path, **kwargs):
-        return SPieceTokenizer(path, **kwargs)
+    add_eos = True
 
-    def __init__(self, tokenizer_path: bytes | str | Path, add_bos=False, add_eos=True):
-        self.add_bos = add_bos
-        self.add_eos = add_eos
+    @staticmethod
+    def from_pretrained(path):
+        return SPieceTokenizer(path)
+
+    def __init__(self, tokenizer_path):
         if torch.is_tensor(tokenizer_path):
             tokenizer_path = tokenizer_path.numpy().tobytes()
 
-        construction_args = {
-            'add_bos': self.add_bos,
-            'add_eos': self.add_eos
-        }
-
+        construction_args = {}
         if isinstance(tokenizer_path, bytes):
             construction_args["model_proto"] = tokenizer_path
         else:
-            if not Path(tokenizer_path).is_file():
-                raise ValueError(f"invalid tokenizer {tokenizer_path}")
             construction_args["model_file"] = tokenizer_path
-
-        self.tokenizer = sentencepiece.SentencePieceProcessor(**construction_args)  # pylint: disable=unexpected-keyword-arg
+        self.tokenizer = sentencepiece.SentencePieceProcessor(add_eos=SPieceTokenizer.add_eos, **construction_args)  # pylint: disable=unexpected-keyword-arg
 
         self.end = self.tokenizer.eos_id()
         self.eos_token_id = self.end
@@ -49,3 +41,4 @@ class SPieceTokenizer:
 
     def clone(self):
         return copy.copy(self)
+

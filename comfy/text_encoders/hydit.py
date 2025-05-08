@@ -15,14 +15,13 @@ class HyditBertModel(sd1_clip.SDClipModel):
         if model_options is None:
             model_options = dict()
         textmodel_json_config = get_path_as_dict(textmodel_json_config, "hydit_clip.json", package=__package__)
-        model_options = {**model_options, "model_name": "hydit_clip"}
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config=textmodel_json_config, dtype=dtype, special_tokens={"start": 101, "end": 102, "pad": 0}, model_class=BertModel, enable_attention_masks=True, return_attention_masks=True)
+
 
 class HyditBertTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, **kwargs):
         tokenizer_path = get_package_as_path(f"{__package__}.hydit_clip_tokenizer")
-        tokenizer_data = kwargs.pop("tokenizer_data", {})
-        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=1024, embedding_key='chinese_roberta', tokenizer_class=BertTokenizer, pad_to_max_length=False, max_length=512, min_length=77, tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=1024, embedding_key='chinese_roberta', tokenizer_class=BertTokenizer, pad_to_max_length=False, max_length=512, min_length=77)
 
 
 class MT5XLModel(sd1_clip.SDClipModel):
@@ -30,8 +29,8 @@ class MT5XLModel(sd1_clip.SDClipModel):
         if model_options is None:
             model_options = dict()
         textmodel_json_config = get_path_as_dict(textmodel_json_config, "mt5_config_xl.json", package=__package__)
-        model_options = {**model_options, "model_name": "mt5xl"}
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config=textmodel_json_config, dtype=dtype, special_tokens={"end": 1, "pad": 0}, model_class=T5, enable_attention_masks=True, return_attention_masks=True)
+
 
 class MT5XLTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, tokenizer_data=None, **kwargs):
@@ -40,7 +39,7 @@ class MT5XLTokenizer(sd1_clip.SDTokenizer):
         if not "spiece_model" in tokenizer_data:
             raise FileNotFoundError("expected a checkpoint that contains the mt5 tokenizer's sentencepiece model")
         tokenizer = tokenizer_data.get("spiece_model", None)
-        super().__init__(tokenizer, pad_with_end=False, embedding_size=2048, embedding_key='mt5xl', tokenizer_class=SPieceTokenizer, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=256, tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer, pad_with_end=False, embedding_size=2048, embedding_key='mt5xl', tokenizer_class=SPieceTokenizer, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=256)
 
     def state_dict(self):
         return {"spiece_model": self.tokenizer.serialize_model()}
@@ -52,9 +51,9 @@ class HyditTokenizer:
             raise FileNotFoundError("expected mt5xl tokenizer data in the checkpoint")
         mt5_tokenizer_data = tokenizer_data.get("mt5xl.spiece_model", None)
         self.hydit_clip = HyditBertTokenizer(embedding_directory=embedding_directory)
-        self.mt5xl = MT5XLTokenizer(tokenizer_data={**tokenizer_data, "spiece_model": mt5_tokenizer_data}, embedding_directory=embedding_directory)
+        self.mt5xl = MT5XLTokenizer(tokenizer_data={"spiece_model": mt5_tokenizer_data}, embedding_directory=embedding_directory)
 
-    def tokenize_with_weights(self, text: str, return_word_ids=False, **kwargs):
+    def tokenize_with_weights(self, text: str, return_word_ids=False):
         out = {}
         out["hydit_clip"] = self.hydit_clip.tokenize_with_weights(text, return_word_ids)
         out["mt5xl"] = self.mt5xl.tokenize_with_weights(text, return_word_ids)

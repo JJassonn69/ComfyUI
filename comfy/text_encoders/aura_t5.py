@@ -16,8 +16,7 @@ class PT5XlModel(sd1_clip.SDClipModel):
 class PT5XlTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, **kwargs):
         tokenizer_path = resources.files("comfy.text_encoders.t5_pile_tokenizer") / "tokenizer.model"
-        tokenizer_data = kwargs.pop("tokenizer_data", {})
-        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=2048, embedding_key='pile_t5xl', tokenizer_class=SPieceTokenizer, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=256, pad_token=1, tokenizer_data=tokenizer_data)
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=2048, embedding_key='pile_t5xl', tokenizer_class=SPieceTokenizer, has_start_token=False, pad_to_max_length=False, max_length=99999999, min_length=256, pad_token=1)
 
 
 class AuraT5Tokenizer(sd1_clip.SD1Tokenizer):
@@ -28,7 +27,5 @@ class AuraT5Tokenizer(sd1_clip.SD1Tokenizer):
 
 
 class AuraT5Model(sd1_clip.SD1ClipModel):
-    def __init__(self, device="cpu", dtype=None, model_options=None, **kwargs):
-        if model_options is None:
-            model_options = {}
+    def __init__(self, device="cpu", dtype=None, model_options={}, **kwargs):
         super().__init__(device=device, dtype=dtype, model_options=model_options, name="pile_t5xl", clip_model=PT5XlModel, **kwargs)

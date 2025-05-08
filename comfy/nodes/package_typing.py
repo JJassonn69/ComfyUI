@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from collections import ChainMap
 from dataclasses import dataclass, field
 from typing import Union, Optional, Sequence, Dict, ClassVar, Protocol, Tuple, TypeVar, Any, Literal, \
-    Callable, List, Type, MutableMapping
+    Callable, List, Type
 
 from typing_extensions import TypedDict, NotRequired
-
-from comfy.comfy_types import FileLocator
 
 T = TypeVar('T')
 
@@ -19,7 +16,6 @@ class IntSpecOptions(TypedDict, total=True):
     step: NotRequired[int]
     display: NotRequired[Literal["number", "slider"]]
     lazy: NotRequired[bool]
-    control_after_generate: NotRequired[bool]
 
 
 class FloatSpecOptions(TypedDict, total=True):
@@ -67,11 +63,6 @@ NonPrimitiveTypeSpec = Tuple[CommonReturnTypes, Any]
 
 InputTypeSpec = Union[IntSpec, FloatSpec, StringSpec, BooleanSpec, ChoiceSpec, NonPrimitiveTypeSpec]
 
-# numpy seeds must be between 0 and 2**32 - 1
-Seed = ("INT", {"default": 0, "min": 0, "max": 2 ** 32 - 1})
-Seed64 = ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True})
-SeedSpec = tuple[Literal["INT"], TypedDict("SeedSpecOptions", {"default": Literal[0], "min": Literal[0], "max": Literal[4294967295]})]
-
 
 class HiddenSpec(TypedDict, total=True):
     prompt: Literal["PROMPT"]
@@ -94,14 +85,11 @@ class FunctionReturnsUIVariables(TypedDict):
     result: NotRequired[Sequence[Any]]
 
 
-class SaveNodeResultT(TypedDict, total=True):
+class SaveNodeResult(TypedDict, total=True):
     abs_path: NotRequired[str]
     filename: str
     subfolder: str
     type: Literal["output", "input", "temp"]
-
-
-SaveNodeResult = SaveNodeResultT
 
 
 class UIImagesImagesResult(TypedDict, total=True):
@@ -111,7 +99,6 @@ class UIImagesImagesResult(TypedDict, total=True):
 class UIImagesResult(TypedDict, total=True):
     ui: UIImagesImagesResult
     result: NotRequired[Sequence[Any]]
-    animated: NotRequired[tuple[bool, ...]]
 
 
 class UILatentsLatentsResult(TypedDict, total=True):
@@ -167,9 +154,9 @@ class CustomNode(Protocol):
 
 @dataclass
 class ExportedNodes:
-    NODE_CLASS_MAPPINGS: MutableMapping[str, CustomNode] = field(default_factory=dict)
-    NODE_DISPLAY_NAME_MAPPINGS: MutableMapping[str, str] = field(default_factory=dict)
-    EXTENSION_WEB_DIRS: MutableMapping[str, str] = field(default_factory=dict)
+    NODE_CLASS_MAPPINGS: Dict[str, CustomNode] = field(default_factory=dict)
+    NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = field(default_factory=dict)
+    EXTENSION_WEB_DIRS: Dict[str, str] = field(default_factory=dict)
 
     def update(self, exported_nodes: ExportedNodes) -> ExportedNodes:
         self.NODE_CLASS_MAPPINGS.update(exported_nodes.NODE_CLASS_MAPPINGS)
@@ -195,24 +182,3 @@ class ExportedNodes:
     def __add__(self, other):
         exported_nodes = ExportedNodes().update(self)
         return exported_nodes.update(other)
-
-
-class _ExportedNodesAsChainMap(ExportedNodes):
-    @classmethod
-    def from_iter(cls, *exported_nodes: ExportedNodes):
-        en = _ExportedNodesAsChainMap()
-        en.NODE_CLASS_MAPPINGS = ChainMap(*[ncm.NODE_CLASS_MAPPINGS for ncm in exported_nodes])
-        en.NODE_DISPLAY_NAME_MAPPINGS = ChainMap(*[ncm.NODE_DISPLAY_NAME_MAPPINGS for ncm in exported_nodes])
-        en.EXTENSION_WEB_DIRS = ChainMap(*[ncm.EXTENSION_WEB_DIRS for ncm in exported_nodes])
-        return en
-
-    def update(self, exported_nodes: ExportedNodes) -> ExportedNodes:
-        self.NODE_CLASS_MAPPINGS = self.NODE_CLASS_MAPPINGS.new_child(exported_nodes.NODE_CLASS_MAPPINGS)
-        self.NODE_DISPLAY_NAME_MAPPINGS = self.NODE_DISPLAY_NAME_MAPPINGS.new_child(exported_nodes.NODE_DISPLAY_NAME_MAPPINGS)
-        self.EXTENSION_WEB_DIRS = self.EXTENSION_WEB_DIRS.new_child(exported_nodes.EXTENSION_WEB_DIRS)
-        return self
-
-
-def exported_nodes_view(*exported_nodes: ExportedNodes) -> ExportedNodes:
-    """Gets a view of all the provided exported nodes, concatenating them together using a ChainMap internally"""
-    return _ExportedNodesAsChainMap.from_iter(*exported_nodes)

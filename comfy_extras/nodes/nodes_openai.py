@@ -67,8 +67,6 @@ class OpenAILanguageModelWrapper(LanguageModel):
         prompt = tokens.get("inputs", [])
         prompt = "".join(prompt)
         images = tokens.get("images", [])
-        images = images if images is not None else []
-        images = [image for image in images if image is not None]
         messages: list[ChatCompletionMessageParam] = [
             {
                 "role": "user",
