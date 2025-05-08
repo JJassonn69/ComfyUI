@@ -1,3 +1,5 @@
+from custom_hook import MultiPathFinder
+
 import comfy.options
 comfy.options.enable_args_parsing()
 
